@@ -9,8 +9,8 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-pub const PROTOCOL_VERSION: i32 = 767;
-pub const MC_VERSION: &str = "1.21.1";
+pub const PROTOCOL_VERSION: i32 = 775;
+pub const MC_VERSION: &str = "26.1.1";
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 pub fn write_varint(v: i32, out: &mut Vec<u8>) {
@@ -83,6 +83,7 @@ impl<'a> Body<'a> {
         self.0
     }
     pub fn take(&mut self, n: usize) -> Body<'a> {
+        let n = n.min(self.0.len());
         let (a, b) = self.0.split_at(n);
         let out = Body(a);
         self.0 = b;
@@ -92,6 +93,7 @@ impl<'a> Body<'a> {
         decode_varint(&mut self.0)
     }
     pub fn u8(&mut self) -> u8 {
+        if self.0.is_empty() { return 0; }
         let b = self.0[0];
         self.0 = &self.0[1..];
         b
@@ -100,6 +102,7 @@ impl<'a> Body<'a> {
         self.u16() as i16
     }
     pub fn u16(&mut self) -> u16 {
+        if self.0.len() < 2 { let v = self.0.first().copied().unwrap_or(0) as u16; self.0 = &self.0[self.0.len().min(1)..]; return v; }
         let mut b = [0u8; 2];
         b.copy_from_slice(&self.0[..2]);
         self.0 = &self.0[2..];
@@ -109,12 +112,14 @@ impl<'a> Body<'a> {
         self.u8() != 0
     }
     pub fn i32(&mut self) -> i32 {
+        if self.0.len() < 4 { self.0 = &self.0[self.0.len()..]; return 0; }
         let mut b = [0u8; 4];
         b.copy_from_slice(&self.0[..4]);
         self.0 = &self.0[4..];
         i32::from_be_bytes(b)
     }
     pub fn i64(&mut self) -> i64 {
+        if self.0.len() < 8 { self.0 = &self.0[self.0.len()..]; return 0; }
         let mut b = [0u8; 8];
         b.copy_from_slice(&self.0[..8]);
         self.0 = &self.0[8..];
@@ -135,7 +140,8 @@ impl<'a> Body<'a> {
         (x, y, z)
     }
     pub fn string(&mut self) -> String {
-        let len = self.varint() as usize;
+        let len = self.varint().max(0) as usize;
+        let len = len.min(self.0.len());
         let s = String::from_utf8_lossy(&self.0[..len]).into_owned();
         self.0 = &self.0[len..];
         s

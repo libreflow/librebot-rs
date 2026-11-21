@@ -1,0 +1,8 @@
+# Binaires et dossiers locaux
+java25/
+mc-server/
+target/
+*.zip
+*.exe
+nul
+config.json

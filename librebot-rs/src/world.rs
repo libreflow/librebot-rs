@@ -58,13 +58,20 @@ impl World {
         self.chunks.len()
     }
 
-    /// Paquet `map_chunk` (0x27).
+    /// Paquet `map_chunk` (0x2d en protocole 775).
     pub fn apply_map_chunk(&mut self, body: &[u8]) -> std::io::Result<()> {
         let mut b = Body(body);
         let x = b.i32();
         let z = b.i32();
-        let _heightmaps = crate::nbt::parse(&mut b.0);
-        let size = b.varint() as usize;
+        // heightmaps : array de {type: varint, data: array of i64} (plus de NBT en 775)
+        let hm_count = b.varint().max(0) as usize;
+        for _ in 0..hm_count {
+            let _hm_type = b.varint();
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n { b.i64(); }
+        }
+        // chunkData : ByteArray (varint length + bytes)
+        let size = b.varint().max(0) as usize;
         let mut data = b.take(size);
         let mut sections = Vec::with_capacity(SECTION_COUNT);
         for _ in 0..SECTION_COUNT {
@@ -74,6 +81,7 @@ impl World {
             sections.push(blocks);
         }
         self.chunks.insert((x, z), Chunk { sections });
+        // Le reste (blockEntities, masques de lumière, skyLight, blockLight) est ignoré
         Ok(())
     }
 
@@ -160,7 +168,8 @@ fn read_paletted(b: &mut Body, count: usize) -> std::io::Result<Paletted> {
             palette.push(b.varint() as u32);
         }
     }
-    let epl = 64 / bits as usize;
+    let epl = if bits >= 64 { 1 } else { 64 / bits as usize };
+    if epl == 0 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bits invalide")); }
     let longs = count.div_ceil(epl);
     let mut data = Vec::with_capacity(longs);
     for _ in 0..longs {

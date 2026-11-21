@@ -37,28 +37,28 @@ mod ids {
         pub const SELECT_KNOWN_PACKS: i32 = 0x07;
     }
     pub mod play_c {
-        pub const WINDOW_ITEMS: i32 = 0x13;
-        pub const BLOCK_CHANGE: i32 = 0x09;
-        pub const SET_SLOT: i32 = 0x15;
-        pub const HELD_ITEM_SLOT_C: i32 = 0x53;
-        pub const UNLOAD_CHUNK: i32 = 0x21;
-        pub const KICK_DISCONNECT: i32 = 0x1d;
-        pub const MAP_CHUNK: i32 = 0x27;
-        pub const KEEP_ALIVE: i32 = 0x26;
-        pub const LOGIN: i32 = 0x2b;
-        pub const POSITION: i32 = 0x40;
-        pub const SYSTEM_CHAT: i32 = 0x6c;
-        pub const PLAYER_CHAT: i32 = 0x39;
+        pub const WINDOW_ITEMS: i32 = 0x12;
+        pub const BLOCK_CHANGE: i32 = 0x08;
+        pub const SET_SLOT: i32 = 0x14;
+        pub const HELD_ITEM_SLOT_C: i32 = 0x69;
+        pub const UNLOAD_CHUNK: i32 = 0x25;
+        pub const KICK_DISCONNECT: i32 = 0x20;
+        pub const MAP_CHUNK: i32 = 0x2d;
+        pub const KEEP_ALIVE: i32 = 0x2c;
+        pub const LOGIN: i32 = 0x31;
+        pub const POSITION: i32 = 0x48;
+        pub const SYSTEM_CHAT: i32 = 0x79;
+        pub const PLAYER_CHAT: i32 = 0x41;
     }
     pub mod play_s {
         pub const TELEPORT_CONFIRM: i32 = 0x00;
-        pub const CHAT_MESSAGE: i32 = 0x06;
-        pub const KEEP_ALIVE: i32 = 0x18;
-        pub const POSITION_LOOK: i32 = 0x1b;
-        pub const WINDOW_CLICK: i32 = 0x0e;
-        pub const BLOCK_DIG: i32 = 0x24;
-        pub const HELD_ITEM_SLOT: i32 = 0x2f;
-        pub const BLOCK_PLACE: i32 = 0x38;
+        pub const CHAT_MESSAGE: i32 = 0x09;
+        pub const KEEP_ALIVE: i32 = 0x1c;
+        pub const POSITION_LOOK: i32 = 0x1f;
+        pub const WINDOW_CLICK: i32 = 0x12;
+        pub const BLOCK_DIG: i32 = 0x29;
+        pub const HELD_ITEM_SLOT: i32 = 0x35;
+        pub const BLOCK_PLACE: i32 = 0x42;
     }
 }
 
@@ -110,11 +110,13 @@ impl Bot {
 
         let mut ls = Vec::new();
         write_string(username, &mut ls);
+        // Protocole 775 (26.1.1) : Login Start = Name (String) + UUID (16 bytes), sans boolean has_uuid
         ls.extend_from_slice(&offline_uuid(username));
         conn.send(ids::login_s::START, &ls).await?;
 
         loop {
-            match conn.read_packet().await? {
+            let pkt = conn.read_packet().await?;
+            match pkt {
                 Eof => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
@@ -134,7 +136,7 @@ impl Bot {
                 }
                 Packet(ids::login_c::SUCCESS, body) => {
                     let mut b = Body(&body);
-                    let _uuid = b.string();
+                    let _uuid = b.take(16); // UUID = 16 octets bruts
                     let name = b.string();
                     conn.send(ids::login_s::ACKNOWLEDGED, &[]).await?;
                     let mut bot = Bot {
@@ -192,14 +194,15 @@ impl Bot {
                         .send(ids::config_s::SELECT_KNOWN_PACKS, &out)
                         .await?;
                     let mut settings = Vec::new();
-                    write_string("fr_FR", &mut settings);
-                    settings.push(8);
-                    crate::protocol::write_varint(0, &mut settings);
-                    settings.push(1);
-                    settings.push(0x7f);
-                    crate::protocol::write_varint(1, &mut settings);
-                    settings.push(0);
-                    settings.push(0);
+                    write_string("fr_FR", &mut settings);   // locale
+                    settings.push(8);                        // viewDistance (i8)
+                    crate::protocol::write_varint(0, &mut settings); // chatFlags
+                    settings.push(1);                        // chatColors
+                    settings.push(0x7f);                     // skinParts (u8)
+                    crate::protocol::write_varint(1, &mut settings); // mainHand (1=right)
+                    settings.push(0);                        // enableTextFiltering
+                    settings.push(0);                        // enableServerListing
+                    crate::protocol::write_varint(0, &mut settings); // particleStatus (0=all)
                     self.conn.send(ids::config_s::SETTINGS, &settings).await?;
                 }
                 Packet(ids::config_c::FINISH, _) => {
@@ -549,11 +552,12 @@ impl Bot {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
-        b.extend_from_slice(&(now.as_millis() as i64).to_be_bytes());
-        b.extend_from_slice(&0i64.to_be_bytes());
-        b.push(0);
-        crate::protocol::write_varint(0, &mut b);
-        b.extend_from_slice(&[0u8; 3]);
+        b.extend_from_slice(&(now.as_millis() as i64).to_be_bytes()); // timestamp
+        b.extend_from_slice(&0i64.to_be_bytes()); // salt
+        b.push(0); // signature: None (option bool = false)
+        crate::protocol::write_varint(0, &mut b); // offset
+        b.extend_from_slice(&[0u8; 3]); // acknowledged (3 bytes)
+        b.push(0); // checksum (u8) — protocole 775
         self.conn.send(ids::play_s::CHAT_MESSAGE, &b).await
     }
 }
@@ -596,8 +600,20 @@ fn parse_player_chat(body: &[u8]) -> Option<String> {
 }
 
 fn chat_reason(body: &[u8]) -> String {
+    // Essayer d'abord comme une string préfixée par VarInt (format texte brut)
+    let mut b = Body(body);
+    let as_string = b.string();
+    if !as_string.is_empty() && as_string.len() < 1000 {
+        return as_string;
+    }
+    // Sinon essayer NBT (composant de chat)
     let mut buf: &[u8] = body;
-    nbt::parse(&mut buf)
-        .map(|n| nbt::text(&n))
-        .unwrap_or_else(|| "<raison illisible>".into())
+    if let Some(n) = nbt::parse(&mut buf) {
+        let t = nbt::text(&n);
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    // Dernier recours : hex dump
+    format!("<raison illisible: {} octets>", body.len())
 }
