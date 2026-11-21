@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 
-mod ids {
+pub(crate) mod ids {
     pub mod login_c {
         pub const DISCONNECT: i32 = 0x00;
         pub const SUCCESS: i32 = 0x02;
@@ -37,28 +37,54 @@ mod ids {
         pub const SELECT_KNOWN_PACKS: i32 = 0x07;
     }
     pub mod play_c {
-        pub const WINDOW_ITEMS: i32 = 0x12;
-        pub const BLOCK_CHANGE: i32 = 0x08;
-        pub const SET_SLOT: i32 = 0x14;
-        pub const HELD_ITEM_SLOT_C: i32 = 0x69;
-        pub const UNLOAD_CHUNK: i32 = 0x25;
-        pub const KICK_DISCONNECT: i32 = 0x20;
-        pub const MAP_CHUNK: i32 = 0x2d;
-        pub const KEEP_ALIVE: i32 = 0x2c;
-        pub const LOGIN: i32 = 0x31;
-        pub const POSITION: i32 = 0x48;
-        pub const SYSTEM_CHAT: i32 = 0x79;
-        pub const PLAYER_CHAT: i32 = 0x41;
+        // IDs protocole 767 (Minecraft 1.21.1) — valeurs originales validées
+        pub const WINDOW_ITEMS: i32 = 0x13;
+        pub const BLOCK_CHANGE: i32 = 0x09;
+        pub const SET_SLOT: i32 = 0x15;
+        pub const HELD_ITEM_SLOT_C: i32 = 0x53;
+        pub const UNLOAD_CHUNK: i32 = 0x21;
+        pub const KICK_DISCONNECT: i32 = 0x1d;
+        pub const MAP_CHUNK: i32 = 0x27;
+        pub const KEEP_ALIVE: i32 = 0x26;
+        pub const LOGIN: i32 = 0x2b;
+        pub const POSITION: i32 = 0x40;
+        pub const SYSTEM_CHAT: i32 = 0x6c;
+        pub const PLAYER_CHAT: i32 = 0x39;
+        pub const PLAYER_INFO: i32 = 0x3e;
+        pub const SET_HEALTH: i32 = 0x59;
+        pub const EXPERIENCE: i32 = 0x58;
+        pub const GAME_EVENT: i32 = 0x1e;
+        pub const RESPAWN: i32 = 0x41;
+        pub const DECLARE_RECIPES: i32 = 0x6d;
+        pub const OPEN_WINDOW: i32 = 0x2e;
+        pub const CLOSE_WINDOW: i32 = 0x13;
+        pub const CHUNK_BATCH_START: i32 = 0x0d;
+        pub const CHUNK_BATCH_FINISHED: i32 = 0x0c;
+        pub const MULTI_BLOCK_CHANGE: i32 = 0x3c;
+        pub const SET_DEFAULT_SPAWN: i32 = 0x4b;
+        pub const UPDATE_VIEW_POSITION: i32 = 0x4a;
+        pub const UPDATE_VIEW_DISTANCE: i32 = 0x4d;
+        pub const SET_TIME: i32 = 0x64;
+        pub const SET_ENTITY_DATA: i32 = 0x52;
     }
     pub mod play_s {
+        // IDs serverbound 767
         pub const TELEPORT_CONFIRM: i32 = 0x00;
-        pub const CHAT_MESSAGE: i32 = 0x09;
-        pub const KEEP_ALIVE: i32 = 0x1c;
-        pub const POSITION_LOOK: i32 = 0x1f;
-        pub const WINDOW_CLICK: i32 = 0x12;
-        pub const BLOCK_DIG: i32 = 0x29;
-        pub const HELD_ITEM_SLOT: i32 = 0x35;
-        pub const BLOCK_PLACE: i32 = 0x42;
+        pub const ATTACK: i32 = 0x01;
+        pub const CHAT_MESSAGE: i32 = 0x06;
+        pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
+        pub const WINDOW_CLICK: i32 = 0x0e;
+        pub const CONTAINER_CLOSE: i32 = 0x0f;
+        pub const POSITION_LOOK: i32 = 0x1b;
+        pub const POSITION: i32 = 0x1a;
+        pub const CRAFT_RECIPE: i32 = 0x1d;
+        pub const BLOCK_DIG: i32 = 0x24;
+        pub const PLAYER_LOADED: i32 = 0x2c;
+        pub const HELD_ITEM_SLOT: i32 = 0x2f;
+        pub const BLOCK_PLACE: i32 = 0x38;
+        pub const USE_ITEM: i32 = 0x2e;
+        pub const SWING: i32 = 0x2d;
+        pub const KEEP_ALIVE: i32 = 0x18;
     }
 }
 
@@ -77,7 +103,7 @@ pub enum Event {
 }
 
 pub struct Bot {
-    conn: Conn,
+    pub(crate) conn: Conn,
     pub username: String,
     pub world: World,
     pub entity_id: Option<i32>,
@@ -93,7 +119,13 @@ pub struct Bot {
     path: VecDeque<(f64, f64)>,
     /// Minage en cours : (x, y, z, secondes restantes, séquence, nom du bloc).
     mining: Option<(i32, i32, i32, f64, i32, &'static str)>,
-    sequence: i32,
+    pub(crate) sequence: i32,
+    /// Recettes déclarées par le serveur (declare_recipes) : index = recipeId.
+    pub recipes: Vec<String>,
+    /// Fenêtre ouverte (table de craft) : windowId, ou None si inventaire seul.
+    pub open_window_id: Option<u8>,
+    /// Compteur de chunks dans le batch en cours.
+    pub(crate) chunks_in_batch: i32,
 }
 
 impl Bot {
@@ -154,6 +186,9 @@ impl Bot {
                         path: VecDeque::new(),
                         mining: None,
                         sequence: 0,
+                        recipes: Vec::new(),
+                        open_window_id: None,
+                        chunks_in_batch: 0,
                     };
                     bot.configuration().await?;
                     return Ok(bot);
@@ -202,7 +237,7 @@ impl Bot {
                     crate::protocol::write_varint(1, &mut settings); // mainHand (1=right)
                     settings.push(0);                        // enableTextFiltering
                     settings.push(0);                        // enableServerListing
-                    crate::protocol::write_varint(0, &mut settings); // particleStatus (0=all)
+                    // En 767: pas de particleStatus
                     self.conn.send(ids::config_s::SETTINGS, &settings).await?;
                 }
                 Packet(ids::config_c::FINISH, _) => {
@@ -223,7 +258,13 @@ impl Bot {
 
     pub async fn play_turn(&mut self) -> std::io::Result<Event> {
         loop {
-            match self.conn.read_packet().await? {
+            let pkt = self.conn.read_packet().await?;
+            if let Packet(id, body) = &pkt {
+                if *id != 0x2c && *id != 0x35 { // pas keep_alive ni held_item
+                    eprintln!("[pkt] 0x{:02x} ({} o)", id, body.len());
+                }
+            }
+            match pkt {
                 Eof => return Ok(Event::Disconnected("connexion fermée".into())),
                 Packet(ids::play_c::KEEP_ALIVE, body) => {
                     let id = Body(&body).i64();
@@ -235,9 +276,22 @@ impl Bot {
                     self.apply_login(&body);
                     return Ok(Event::Connected);
                 }
+                // chunk_batch_start (0x0c en 775) : début d'un batch de chunks
+                Packet(ids::play_c::CHUNK_BATCH_START, _) => {
+                    self.chunks_in_batch = 0;
+                }
+                // chunk_batch_finished : répondre chunk_batch_received (float: desired chunks/tick en 767)
+                Packet(ids::play_c::CHUNK_BATCH_FINISHED, _) => {
+                    let out = 64.0f32.to_be_bytes().to_vec();
+                    self.conn.send(ids::play_s::CHUNK_BATCH_RECEIVED, &out).await.ok();
+                    self.chunks_in_batch = 0;
+                }
                 Packet(ids::play_c::MAP_CHUNK, body) => {
-                    if let Err(e) = self.world.apply_map_chunk(&body) {
-                        eprintln!("chunk illisible : {}", e);
+                    eprintln!("[chunk] reçu {} octets", body.len());
+                    self.chunks_in_batch += 1;
+                    match self.world.apply_map_chunk(&body) {
+                        Ok(()) => eprintln!("[chunk] OK ({} octets, {} chunks total)", body.len(), self.world.chunk_count()),
+                        Err(e) => eprintln!("[chunk] ERREUR ({} octets): {} — hex: {:02x?}", body.len(), e, &body[..body.len().min(60)]),
                     }
                 }
                 Packet(ids::play_c::UNLOAD_CHUNK, body) => {
@@ -267,6 +321,9 @@ impl Bot {
                         crate::protocol::write_varint(id, &mut out);
                         self.conn.send(ids::play_s::TELEPORT_CONFIRM, &out).await?;
                     }
+                    // player_loaded : signale que le client est prêt
+                    // pas de player_loaded en 767
+                    // pas de chunk_batch_received initial non plus (le serveur envoie les chunks directement)
                     return Ok(Event::Spawned);
                 }
                 Packet(ids::play_c::SYSTEM_CHAT, body) => {
@@ -288,6 +345,35 @@ impl Bot {
                     let reason = chat_reason(&body);
                     return Ok(Event::Disconnected(reason));
                 }
+                // declare_recipes (0x85 en 775) : liste des recettes {name, items}
+                Packet(ids::play_c::DECLARE_RECIPES, body) => {
+                    let mut b = Body(&body);
+                    let n = b.varint().max(0) as usize;
+                    for _ in 0..n {
+                        let name = b.string();
+                        let n_items = b.varint().max(0) as usize;
+                        for _ in 0..n_items { b.varint(); }
+                        self.recipes.push(name);
+                    }
+                    // stonecutter recipes (on les ignore)
+                    let _n_sc = b.varint().max(0) as usize;
+                }
+                // open_window (0x3b en 775) : ouverture d'une fenêtre (table, fourneau...)
+                Packet(ids::play_c::OPEN_WINDOW, body) => {
+                    let mut b = Body(&body);
+                    let window_id = b.u8();
+                    let _window_type = b.varint();
+                    let _title_len = b.varint();
+                    // skip title NBT/string
+                    let _ = crate::nbt::parse(&mut b.0);
+                    self.open_window_id = Some(window_id);
+                }
+                // close_window (0x11 en 775)
+                Packet(ids::play_c::CLOSE_WINDOW, body) => {
+                    let mut b = Body(&body);
+                    let _window_id = b.u8();
+                    self.open_window_id = None;
+                }
                 Packet(_, _) => {}
             }
         }
@@ -295,7 +381,7 @@ impl Bot {
 
     /// Paquet `login` (0x2b) : entityId, dimension, etc.
     fn apply_login(&mut self, body: &[u8]) {
-        let mut b = Body(body);
+        let mut b = Body(&body);
         self.entity_id = Some(b.i32());
         let _hardcore = b.bool();
         let n_worlds = b.varint() as usize;
@@ -333,7 +419,7 @@ impl Bot {
 
     /// Paquet `position` (0x40) : renvoie l'ID de téléport à confirmer.
     fn apply_position(&mut self, body: &[u8]) -> Option<i32> {
-        let mut b = Body(body);
+        let mut b = Body(&body);
         let x = b.f64();
         let y = b.f64();
         let z = b.f64();
@@ -442,6 +528,19 @@ impl Bot {
     }
 
     /// Pas de simulation : avance du chemin, saut sur obstacle, gravité, contact au sol.
+    /// Lit et traite tous les paquets en attente sans bloquer (drain).
+    /// À appeler régulièrement pendant les actions longues pour garder le monde à jour.
+    pub async fn drain_packets(&mut self) {
+        // Lire jusqu'à 300 paquets ou timeout de 50ms sans données
+        for _ in 0..300 {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), self.play_turn()).await {
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => break,
+                Err(_) => break, // timeout = plus rien en attente
+            }
+        }
+    }
+
     pub async fn tick(&mut self, dt: f64) -> std::io::Result<()> {
         let Some(p) = self.pos else { return Ok(()) };
         let mut pos = p;
@@ -516,6 +615,8 @@ impl Bot {
         if moved {
             self.send_position().await?;
         }
+        // client_tick_end (0x0d en 775) : envoyé à chaque tick pour débloquer l'envoi des chunks
+        // tick_end désactivé en 767
         if let Some((x, y, z, remaining, seq, name)) = self.mining {
             let remaining = remaining - dt;
             if remaining <= 0.0 {
@@ -527,6 +628,8 @@ impl Bot {
                 crate::protocol::write_varint(seq, &mut b);
                 self.conn.send(ids::play_s::BLOCK_DIG, &b).await?;
                 println!("miné {} en ({}, {}, {})", name, x, y, z);
+                // Marquer le bloc comme air localement (le serveur confirmera par block_change)
+                self.world.set_block_state(x, y, z, 0);
             } else {
                 self.mining = Some((x, y, z, remaining, seq, name));
             }
@@ -565,7 +668,7 @@ impl Bot {
 /// Paquet `player_chat` (0x39) : "<pseudo> message" (best effort).
 /// Suppose le chat type référencé par ID (registre synchronisé en configuration).
 fn parse_player_chat(body: &[u8]) -> Option<String> {
-    let mut b = Body(body);
+    let mut b = Body(&body);
     let _sender_uuid = b.string();
     let _index = b.varint();
     if b.bool() {
@@ -601,7 +704,7 @@ fn parse_player_chat(body: &[u8]) -> Option<String> {
 
 fn chat_reason(body: &[u8]) -> String {
     // Essayer d'abord comme une string préfixée par VarInt (format texte brut)
-    let mut b = Body(body);
+    let mut b = Body(&body);
     let as_string = b.string();
     if !as_string.is_empty() && as_string.len() < 1000 {
         return as_string;

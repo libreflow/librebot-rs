@@ -1076,6 +1076,11 @@ pub fn block_name(state: u32) -> &'static str {
     MC_BLOCKS[index_of(state)].1
 }
 
+/// Trouve le premier block state dont le nom correspond (ex: "oak_log").
+pub fn block_state_by_name(name: &str) -> Option<u32> {
+    MC_BLOCKS.iter().find(|r| r.1 == name).map(|r| r.0)
+}
+
 /// Un bloc est solide s'il a une hitbox de collision (shapes non vides).
 pub fn is_solid(state: u32) -> bool {
     MC_BLOCKS[index_of(state)].2

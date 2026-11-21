@@ -1,8 +1,10 @@
 # Binaires et dossiers locaux
 java25/
 mc-server/
+mc-server-1211/
 target/
 *.zip
 *.exe
 nul
 config.json
+session.lock

@@ -9,8 +9,8 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-pub const PROTOCOL_VERSION: i32 = 775;
-pub const MC_VERSION: &str = "26.1.1";
+pub const PROTOCOL_VERSION: i32 = 767;
+pub const MC_VERSION: &str = "1.21.1";
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 pub fn write_varint(v: i32, out: &mut Vec<u8>) {

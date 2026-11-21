@@ -23,7 +23,10 @@ impl Paletted {
         if let Some(v) = self.single {
             return v;
         }
-        let epl = 64 / self.bits as usize;
+        if self.bits == 0 || self.data.is_empty() {
+            return 0;
+        }
+        let epl = (64 / self.bits as usize).max(1);
         let long = self.data[idx / epl];
         let shift = (idx % epl) * self.bits as usize;
         let value = (long >> shift) as u32 & ((1u32 << self.bits) - 1);
@@ -56,6 +59,11 @@ impl World {
 
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Le chunk (cx, cz) est-il chargé ?
+    pub fn has_chunk(&self, cx: i32, cz: i32) -> bool {
+        self.chunks.contains_key(&(cx, cz))
     }
 
     /// Paquet `map_chunk` (0x2d en protocole 775).

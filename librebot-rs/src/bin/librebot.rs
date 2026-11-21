@@ -65,7 +65,20 @@ async fn session(bot: Bot) {
         tokio::select! {
             ev = bot.play_turn() => match ev {
                 Ok(Event::Connected) => {
-                    println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id)
+                    println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id);
+                    // Lancer la mission survie automatiquement
+                    println!("--- Démarrage de la mission survie ---");
+                    let r1 = bot.phase_wood().await;
+                    println!("Phase bois: {}", if r1 { "OK" } else { "ÉCHEC" });
+                    if r1 {
+                        let r2 = bot.phase_stone().await;
+                        println!("Phase pierre: {}", if r2 { "OK" } else { "ÉCHEC" });
+                        if r2 {
+                            let r3 = bot.phase_iron().await;
+                            println!("Phase fer: {}", if r3 { "OK" } else { "ÉCHEC" });
+                        }
+                    }
+                    println!("--- Mission terminée, bot en attente de commandes ---");
                 }
                 Ok(Event::Spawned) => {
                     if let Some(p) = bot.pos {

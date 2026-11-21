@@ -86,19 +86,16 @@ impl Inventory {
     }
 }
 
-/// Décode un slot (varint count ; 0 = vide ; sinon id + composants).
-/// Les slots avec composants supplémentaires ne sont pas encore supportés.
+/// Décode un slot (protocole 767 / 1.21.1) : bool present ; si true → itemId(varint) + count(i8) + NBT.
 pub fn read_slot(b: &mut Body) -> Option<Option<ItemStack>> {
-    let count = b.varint();
-    if count == 0 {
+    let present = b.bool();
+    if !present {
         return Some(None);
     }
     let id = b.varint();
-    let added = b.varint();
-    let removed = b.varint();
-    if added != 0 || removed != 0 {
-        return None;
-    }
+    let count = b.u8() as i32; // count = i8 en 767
+    // Skip NBT (peut être présent)
+    let _ = crate::nbt::parse(&mut b.0);
     Some(Some(ItemStack { id, count }))
 }
 
