@@ -10,4 +10,5 @@ pub mod path;
 pub mod protocol;
 pub mod recipes;
 pub mod survie;
+pub mod camp;
 pub mod world;

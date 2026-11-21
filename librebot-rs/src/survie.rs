@@ -56,7 +56,7 @@ impl Bot {
     }
 
     /// Interaction (use_item_on) sur un bloc pour ouvrir son conteneur.
-    async fn interact_open(&mut self, cx: i32, cy: i32, cz: i32) -> Option<u8> {
+    pub(crate) async fn interact_open(&mut self, cx: i32, cy: i32, cz: i32) -> Option<u8> {
         let seq = self.sequence + 1;
         self.sequence = seq;
         let mut b = Vec::new();
@@ -495,7 +495,20 @@ impl Bot {
             self.pickup_drops(6.0).await;
             self.eat_if_needed().await;
 
-            // 2) Progression par paliers d'équipement
+            // 2) Campement : l'établir une fois, l'aménager, dormir, ranger le surplus
+            if self.camp.is_none() {
+                self.camp = crate::camp::Camp::load();
+            }
+            if self.camp.is_none() {
+                self.ensure_camp().await;
+            }
+            if self.camp.is_some() {
+                self.camp_expand().await;
+                self.sleep_if_night().await;
+                self.deposit_surplus_if_full(40).await;
+            }
+
+            // 3) Progression par paliers d'équipement
             let a_outil = |nom: &str| self.inventory.count(item_id(nom)) > 0;
 
             if a_outil("iron_pickaxe") {

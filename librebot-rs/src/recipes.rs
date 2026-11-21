@@ -191,6 +191,11 @@ pub fn recipe_for(result_name: &str) -> Option<Recipe> {
             ingredients: vec![(item_id("coal"), 1), (item_id("stick"), 1)],
             needs_table: false,
         },
+        "white_bed" => Recipe {
+            result: id, result_count: 1,
+            ingredients: vec![(item_id("oak_planks"), 3), (item_id("white_wool"), 3)],
+            needs_table: true,
+        },
         "chest" => Recipe {
             result: id, result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 8)],

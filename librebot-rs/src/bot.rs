@@ -150,6 +150,10 @@ pub struct Bot {
     pub food: i32,
     /// Entités connues autour du bot (animaux, items jetés, mobs).
     pub entities: Entities,
+    /// Heure du monde (ticks de journée, 0-24000) — pour savoir quand dormir.
+    pub day_time: i64,
+    /// Campement du bot, s'il en a établi un.
+    pub camp: Option<crate::camp::Camp>,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -240,6 +244,8 @@ impl Bot {
                         health: 20.0,
                         food: 20,
                         entities: Entities::new(),
+                        day_time: 0,
+                        camp: None,
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
@@ -379,6 +385,11 @@ impl Bot {
                     }
                 }
                 Packet(ids::play_c::HELD_ITEM_SLOT_C, _) => {}
+                Packet(ids::play_c::SET_TIME, body) => {
+                    let mut b = Body(&body);
+                    let _age = b.i64();
+                    self.day_time = b.i64();
+                }
                 Packet(ids::play_c::SET_HEALTH, body) => {
                     let mut b = Body(&body);
                     let hp = b.f32();
