@@ -637,7 +637,9 @@ impl Bot {
                 if !blocked {
                     pos[0] = nx;
                     pos[2] = nz;
-                    self.yaw = (dz).atan2(dx) as f32;
+                    // Yaw vanilla en DEGRÉS : 0 = +Z (sud), 90 = ouest (-X),
+                    // direction regardée = (-sin(yaw), cos(yaw)).
+                    self.yaw = (-dx).atan2(dz).to_degrees() as f32;
                     moved = true;
                 } else if self.on_ground {
                     self.vy = JUMP_VELOCITY;
@@ -659,23 +661,29 @@ impl Bot {
             let raw_y = pos[1] + self.vy * dt;
             let mut final_y = raw_y.max(crate::world::MIN_Y as f64);
             if self.vy < 0.0 {
+                // Balayer tous les blocs traversés pendant ce tick : à vitesse
+                // terminale, un seul test peut sauter une dalle fine (tunneling).
+                let above = (pos[1] - 0.001).floor() as i32;
                 let below = (final_y - 0.001).floor() as i32;
                 let (fx, fz) = (pos[0].floor() as i32, pos[2].floor() as i32);
-                if below >= crate::world::MIN_Y && self.world.is_solid(fx, below, fz) {
-                    let top = below as f64 + 1.0;
-                    if top <= pos[1] {
-                        final_y = top;
-                        if !self.on_ground {
-                            self.on_ground = true;
-                            println!(
-                                "atterri sur {} en ({:.2}, {}, {:.2})",
-                                self.world.block_name(fx, below, fz).unwrap_or("?"),
-                                pos[0],
-                                top,
-                                pos[2]
-                            );
+                for by in (below..=above).rev() {
+                    if by >= crate::world::MIN_Y && self.world.is_solid(fx, by, fz) {
+                        let top = by as f64 + 1.0;
+                        if top <= pos[1] {
+                            final_y = top;
+                            if !self.on_ground {
+                                self.on_ground = true;
+                                println!(
+                                    "atterri sur {} en ({:.2}, {}, {:.2})",
+                                    self.world.block_name(fx, by, fz).unwrap_or("?"),
+                                    pos[0],
+                                    top,
+                                    pos[2]
+                                );
+                            }
+                            self.vy = 0.0;
+                            break;
                         }
-                        self.vy = 0.0;
                     }
                 }
             }

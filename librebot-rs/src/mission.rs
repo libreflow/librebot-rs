@@ -92,38 +92,51 @@ impl Bot {
     /// Va vers un bloc et le mine. Retourne true si miné.
     pub async fn goto_and_dig(&mut self, x: i32, y: i32, z: i32) -> bool {
         // Le serveur n'accepte le minage que dans un rayon de 4,5 blocs
-        // autour des yeux : s'approcher jusqu'à être à portée.
-        let mut proche = false;
-        for _approche in 0..3 {
+        // autour des yeux. Approche par étages : progresser vers le bloc
+        // par segments de ~12 blocs (gère les fortes dénivelées, un A*
+        // direct dépasse son budget d'expansions sur 100+ blocs de pente).
+        let mut a_portee = false;
+        for etage in 0..40 {
             let Some(p) = self.pos else { return false };
             let dx = p[0] - (x as f64 + 0.5);
             let dy = p[1] + 1.62 - (y as f64 + 0.5);
             let dz = p[2] - (z as f64 + 0.5);
-            let d = (dx * dx + dy * dy + dz * dz).sqrt();
-            if d <= 4.0 {
-                proche = true;
+            let d3 = (dx * dx + dy * dy + dz * dz).sqrt();
+            if d3 <= 4.0 {
+                a_portee = true;
                 break;
             }
-            // Aller sur une cellule libre adjacente au bloc
-            match self.find_adjacent_free(x, y, z) {
-                Some((sx, sy, sz)) => {
-                    self.goto(sx, sy, sz).await;
-                    for _ in 0..200 {
-                        if self.path_len() == 0 { break; }
-                        self.drain_packets().await; self.tick(0.05).await.ok();
-                    }
-                }
-                None => break,
+            // Déjà sous/à côté du bloc : pas d'étage horizontal possible
+            let horiz = (dx * dx + dz * dz).sqrt();
+            if horiz < 2.0 {
+                break;
+            }
+            if etage == 0 {
+                eprintln!(
+                    "approche de ({}, {}, {}) : {:.0} blocs (altitude {:+.0})",
+                    x, y, z, d3, -(p[1] - y as f64)
+                );
+            }
+            // Point intermédiaire en direction du bloc
+            let pas = horiz.min(12.0);
+            let tx = (p[0] - dx / horiz * pas).floor() as i32;
+            let tz = (p[2] - dz / horiz * pas).floor() as i32;
+            let Some((gx, gy, gz)) = self.find_walkable_near(tx, p[1].floor() as i32 + 1, tz) else {
+                break;
+            };
+            self.goto(gx, gy, gz).await;
+            for _ in 0..200 {
+                if self.path_len() == 0 { break; }
+                self.drain_packets().await; self.tick(0.05).await.ok();
             }
         }
-        if !proche {
+        if !a_portee {
             if let Some(p) = self.pos {
                 let dx = p[0] - (x as f64 + 0.5);
                 let dy = p[1] + 1.62 - (y as f64 + 0.5);
                 let dz = p[2] - (z as f64 + 0.5);
                 if (dx * dx + dy * dy + dz * dz).sqrt() > 4.5 {
                     // Hors de portée : le serveur rejetterait le minage en silence.
-                    eprintln!("bloc ({}, {}, {}) hors de portée, on cherche ailleurs", x, y, z);
                     self.remember_failed(x, y, z);
                     return false;
                 }

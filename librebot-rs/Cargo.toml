@@ -2,6 +2,7 @@
 name = "librebot-rs"
 version = "0.1.0"
 edition = "2021"
+default-run = "librebot"
 description = "Bot Minecraft Java Edition autonome en Rust (client protocole natif, zérot dépendance à Node)"
 license = "MIT"
 
@@ -13,3 +14,7 @@ md-5 = "0.10"
 [profile.release]
 lto = true
 strip = true
+
+[[bin]]
+name = "librebot-cmd"
+path = "src/bin/librebot_cmd.rs"
