@@ -59,6 +59,7 @@ async fn session(bot: Bot) {
     });
 
     let mut bot = bot;
+    let mut derniere_apparition: Option<[f64; 3]> = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     enum Tour {
@@ -118,8 +119,20 @@ async fn session(bot: Bot) {
                     println!("--- Mission terminée, bot en attente de commandes ---");
                 }
                 Ok(Event::Spawned) => {
-                    if let Some(p) = bot.pos {
-                        println!("apparition en ({:.2}, {:.2}, {:.2})", p[0], p[1], p[2]);
+                    // Le serveur renvoie ce paquet à chaque téléport corrective :
+                    // n'afficher que les changements réels de position.
+                    let affiche = match (bot.pos, derniere_apparition) {
+                        (Some(p), Some(last)) => {
+                            (p[0] - last[0]).abs() > 1.0 || (p[2] - last[2]).abs() > 1.0
+                        }
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+                    if affiche {
+                        if let Some(p) = bot.pos {
+                            println!("apparition en ({:.2}, {:.2}, {:.2})", p[0], p[1], p[2]);
+                            derniere_apparition = Some(p);
+                        }
                     }
                 }
                 Ok(Event::Chat(t)) => println!("{}", t),

@@ -122,9 +122,21 @@ impl Bot {
             let tx = (p[0] - dx / horiz * pas).floor() as i32;
             let tz = (p[2] - dz / horiz * pas).floor() as i32;
             let Some((gx, gy, gz)) = self.find_walkable_near(tx, p[1].floor() as i32 + 1, tz) else {
+                let ty = p[1].floor() as i32 + 1;
+                eprintln!(
+                    "aucune cellule praticable vers ({},{},{}), sol={:?}, dessus={:?}, encore={:?}",
+                    tx, ty, tz,
+                    self.world.block_state(tx, ty - 1, tz),
+                    self.world.block_state(tx, ty, tz),
+                    self.world.block_state(tx, ty + 1, tz)
+                );
                 break;
             };
-            self.goto(gx, gy, gz).await;
+            let chemin = self.goto(gx, gy, gz).await;
+            eprintln!(
+                "[étage {}] vers ({},{},{}) chemin={:?} (reste {:.0} blocs, pieds y={:.0})",
+                etage, gx, gy, gz, chemin, d3, p[1]
+            );
             for _ in 0..200 {
                 if self.path_len() == 0 { break; }
                 self.drain_packets().await; self.tick(0.05).await.ok();

@@ -82,11 +82,59 @@ impl World {
         let size = b.varint().max(0) as usize;
         let mut data = b.take(size);
         let mut sections = Vec::with_capacity(SECTION_COUNT);
-        for _ in 0..SECTION_COUNT {
+        if crate::bot::debug_enabled() {
+            eprintln!("[chunk {},{}] hex debut data: {:02x?}", x, z, &data.rest()[..data.rest().len().min(2400)]);
+        }
+        for (si_dbg, _si) in (0..SECTION_COUNT).enumerate() {
             let _block_count = data.u16();
-            let blocks = read_paletted(&mut data, SECTION_VOLUME)?;
-            let _biomes = read_paletted(&mut data, 64)?;
+            let blocs_bits = data.0.first().copied().unwrap_or(255);
+            let section_index = si_dbg;
+            let res = read_paletted(&mut data, SECTION_VOLUME, false);
+            let blocks = match res {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!(
+                        "[chunk {},{}] ERREUR section {}: {} — position courante : {:02x?}",
+                        x, z, section_index, e,
+                        &data.rest()[..data.rest().len().min(48)]
+                    );
+                    return Err(e);
+                }
+            };
+            let biomes_bits = data.0.first().copied().unwrap_or(255);
+            let _biomes = read_paletted(&mut data, 64, true)?;
+            if crate::bot::debug_enabled() {
+                let n_non_air = (0..SECTION_VOLUME)
+                    .filter(|&i| blocks.get(i, SECTION_VOLUME) != 0)
+                    .count();
+                let reste = data.rest().len();
+                eprintln!(
+                    "  section bits={} biomes_bits={} non-air={} octets restants={}",
+                    blocs_bits, biomes_bits, n_non_air, reste
+                );
+            }
             sections.push(blocks);
+        }
+        if crate::bot::debug_enabled() {
+            let mut non_air = 0u32;
+            let mut top_y = i32::MIN;
+            for (si, sec) in sections.iter().enumerate() {
+                for i in 0..SECTION_VOLUME {
+                    let state = sec.get(i, SECTION_VOLUME);
+                    if state != 0 {
+                        non_air += 1;
+                        let ly = (i / 256) as i32;
+                        let y = MIN_Y + (si as i32) * 16 + ly;
+                        if y > top_y {
+                            top_y = y;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[chunk {},{}] {} blocs non-air, sommet y={}",
+                x, z, non_air, top_y
+            );
         }
         self.chunks.insert((x, z), Chunk { sections });
         // Le reste (blockEntities, masques de lumière, skyLight, blockLight) est ignoré
@@ -158,26 +206,51 @@ impl World {
     }
 }
 
-fn read_paletted(b: &mut Body, count: usize) -> std::io::Result<Paletted> {
+/// Lit une valeur de palette ; les containers biome utilisent des
+/// RegistryEntryHolder : id varint + bool hasData + NBT optionnel.
+fn read_registry_value(b: &mut Body, registry: bool) -> i32 {
+    let id = b.varint();
+    if registry && b.bool() {
+        let _ = crate::nbt::parse(&mut b.0);
+    }
+    id
+}
+
+fn read_paletted(b: &mut Body, count: usize, registry: bool) -> std::io::Result<Paletted> {
     let bits = b.u8() as u32;
     if bits == 0 {
         return Ok(Paletted {
             palette: Vec::new(),
-            single: Some(b.varint() as u32),
+            single: Some(read_registry_value(b, registry) as u32),
             data: Vec::new(),
             bits: 0,
         });
     }
     let mut palette = Vec::new();
     if bits <= 8 {
+        if registry && bits > 3 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("bits biome invalide: {}", bits),
+            ));
+        }
         let n = b.varint() as usize;
         for _ in 0..n {
-            palette.push(b.varint() as u32);
+            palette.push(read_registry_value(b, registry) as u32);
         }
     }
-    let epl = if bits >= 64 { 1 } else { 64 / bits as usize };
-    if epl == 0 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bits invalide")); }
-    let longs = count.div_ceil(epl);
+    if bits == 0 || bits > 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("bits par entrée invalide: {}", bits),
+        ));
+    }
+    let epl = 64 / bits as usize;
+    // Le tableau de longs est préfixé par sa longueur (VarInt) : la lire
+    // au lieu de la deviner, sinon tout le reste du chunk est désaligné.
+    // Borner au contenu réellement disponible : un chunk maltraité ne doit
+    // jamais pouvoir faire exploser la mémoire.
+    let longs = (b.varint().max(0) as usize).min(b.rest().len().div_ceil(8));
     let mut data = Vec::with_capacity(longs);
     for _ in 0..longs {
         data.push(b.i64() as u64);
@@ -207,6 +280,7 @@ mod tests {
         }
         let epl = 64 / bits as usize;
         let longs = SECTION_VOLUME.div_ceil(epl);
+        crate::protocol::write_varint(longs as i32, &mut out);
         for i in 0..longs {
             let value = if i == 0 { first_value as u64 } else { 0 };
             out.extend_from_slice(&value.to_be_bytes());
@@ -227,11 +301,12 @@ mod tests {
             if s == 0 {
                 sections_blob.extend_from_slice(&build_section(4, &[0, 1], 1));
             } else {
-                sections_blob.push(0x00);
-                sections_blob.push(0x00);
+                sections_blob.push(0x00); // blocs : bits = 0 (valeur unique)
+                sections_blob.push(0x00); // valeur = air
             }
-            sections_blob.push(0x00);
-            sections_blob.push(0x00);
+            sections_blob.push(0x00); // biome : bits = 0 (valeur unique)
+            sections_blob.push(0x00); // biome : id = 0
+            sections_blob.push(0x00); // biome : hasData = false
         }
         crate::protocol::write_varint(sections_blob.len() as i32, &mut body);
         body.extend_from_slice(&sections_blob);

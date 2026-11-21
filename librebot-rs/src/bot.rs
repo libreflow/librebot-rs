@@ -651,8 +651,14 @@ impl Bot {
         if self.on_ground {
             let support = (pos[1] - 0.001).floor() as i32;
             let (fx, fz) = (pos[0].floor() as i32, pos[2].floor() as i32);
-            if !(support >= crate::world::MIN_Y && self.world.is_solid(fx, support, fz)) {
-                self.on_ground = false;
+            match self.world.block_state(fx, support, fz) {
+                // Sol non chargé : ne pas « tomber » à l'aveugle — le serveur
+                // rejetterait ces positions (téléportation corrective en boucle).
+                None => {}
+                Some(_) if !self.world.is_solid(fx, support, fz) => {
+                    self.on_ground = false;
+                }
+                Some(_) => {}
             }
         }
 
@@ -772,7 +778,7 @@ impl Bot {
     }
 }
 
-fn debug_enabled() -> bool {
+pub(crate) fn debug_enabled() -> bool {
     static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DBG.get_or_init(|| std::env::var_os("LIBREBOT_DEBUG").is_some())
 }
