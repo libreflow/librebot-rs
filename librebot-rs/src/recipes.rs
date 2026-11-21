@@ -1,7 +1,7 @@
 //! Table de recettes de craft simplifiée + helper item_id par nom.
 //! Source : recettes vanilla 1.21.1/26.1 (crafting grid 2x2 ou 3x3).
 
-use crate::items_gen::{item_name, MC_ITEMS};
+use crate::items_gen::MC_ITEMS;
 
 /// Trouve l'ID d'un item par son nom (ex: "oak_planks").
 pub fn item_id(name: &str) -> i32 {
@@ -30,6 +30,9 @@ pub struct Recipe {
 /// Recettes vanilla essentielles pour la survie jusqu'au dragon.
 /// Ordre : on essaie dans l'ordre, la première réalisable gagne.
 pub fn recipe_for(result_name: &str) -> Option<Recipe> {
+    if !item_exists(result_name) {
+        return None;
+    }
     let id = item_id(result_name);
     let r = match result_name {
         // --- Bois ---

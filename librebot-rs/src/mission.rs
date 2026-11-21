@@ -3,7 +3,7 @@
 
 use crate::bot::Bot;
 use crate::bot::ids;
-use crate::protocol::{write_position, write_varint, write_string, Body};
+use crate::protocol::{write_position, write_varint, write_string};
 use crate::recipes::{item_id, recipe_for};
 use crate::items_gen::item_name;
 
@@ -137,21 +137,22 @@ impl Bot {
             }
         }
 
-        // Trouver le recipeId dans les recettes déclarées
+        // Trouver l'identifiant de la recette parmi celles déclarées par le serveur
         let full_name = format!("minecraft:{}", result_name);
-        let Some(recipe_id) = self.recipes.iter().position(|r| r == &full_name || r == result_name) else {
+        let Some(name) = self
+            .recipes
+            .iter()
+            .find(|r| r.as_str() == full_name || r.as_str() == result_name || r.ends_with(&format!(":{}", result_name)))
+            .cloned()
+        else {
             eprintln!("recette {} non déclarée par le serveur ({} recettes)", result_name, self.recipes.len());
-            // Essai sans préfixe
-            let Some(id) = self.recipes.iter().position(|r| r.ends_with(&format!(":{}", result_name))) else {
-                return false;
-            };
-            return self.send_craft(id, recipe.needs_table).await;
+            return false;
         };
 
-        self.send_craft(recipe_id, recipe.needs_table).await
+        self.send_craft(&name, recipe.needs_table).await
     }
 
-    async fn send_craft(&mut self, recipe_id: usize, needs_table: bool) -> bool {
+    async fn send_craft(&mut self, recipe_name: &str, needs_table: bool) -> bool {
         // Si la recette nécessite une table et qu'aucune fenêtre n'est ouverte,
         // on ne peut pas crafter (il faut poser une table d'abord — géré par la mission)
         let window_id = if needs_table {
@@ -168,9 +169,8 @@ impl Bot {
 
         let mut b = Vec::new();
         b.push(window_id);
-        write_varint(recipe_id as i32, &mut b);
+        write_string(recipe_name, &mut b);
         b.push(1); // makeAll = true
-        // packet craft_recipe_request = 0x27 en 775
         if self.conn.send(ids::play_s::CRAFT_RECIPE, &b).await.is_ok() {
             // Attendre que l'item arrive dans l'inventaire
             for _ in 0..40 {
@@ -182,44 +182,61 @@ impl Bot {
         }
     }
 
-    /// Pose une table de craft devant soi et l'ouvre.
+    /// Cherche une cellule libre (solide dessous, air dessus) à proximité.
+    fn find_free_cell_near(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
+        for dist in 1..=3 {
+            for (dx, dz) in [(dist, 0), (-dist, 0), (0, dist), (0, -dist), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
+                let (cx, cz) = (x + dx, z + dz);
+                for cy in [y, y + 1] {
+                    if self.world.is_solid(cx, cy - 1, cz)
+                        && !self.world.is_solid(cx, cy, cz)
+                        && !self.world.is_solid(cx, cy + 1, cz)
+                    {
+                        return Some((cx, cy, cz));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Pose une table de craft à côté de soi et l'ouvre.
     pub async fn place_and_open_crafting_table(&mut self) -> bool {
         let table_id = item_id("crafting_table");
-        let Some(slot) = self.inventory.find(table_id) else {
+        if self.inventory.find(table_id).is_none() {
             eprintln!("pas de table de craft dans l'inventaire");
             return false;
-        };
-        self.select_hotbar_by_item(table_id).await;
+        }
+        if !self.select_hotbar_by_item(table_id).await {
+            eprintln!("impossible de prendre la table en main");
+            return false;
+        }
 
-        // Poser la table 2 blocs devant
         let p = match self.pos { Some(p) => p, None => return false };
-        let (fx, fz) = (p[0].round() as i32, p[2].round() as i32);
-        let fy = p[1].floor() as i32 - 1; // bloc sous les pieds
-        let tx = fx + (self.yaw.sin() * -2.0).round() as i32;
-        let tz = fz + (self.yaw.cos() * 2.0).round() as i32;
+        let (fx, fy, fz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+        let Some((cx, cy, cz)) = self.find_free_cell_near(fx, fy, fz) else {
+            eprintln!("aucune cellule libre autour pour poser la table");
+            return false;
+        };
 
-        // Poser sur le dessus du bloc sous les pieds
-        if self.place(fx, fy, fz, 1).await.is_err() {
+        // Poser la table sur le dessus du bloc sous la cellule libre
+        if self.place(cx, cy - 1, cz, 1).await.is_err() {
             return false;
         }
         self.drain_packets().await; self.tick(0.3).await.ok();
 
-        // Ouvrir la table : use_item_on (block_place avec hand=0 sur la table = interaction)
-        // En fait, clic droit sur la table = packet use_item (0x43) ou use_item_on (0x42 = block_place)
-        // On envoie use_item_on sur la position de la table, face haut
+        // Ouvrir la table : use_item_on (block_place) sur la table, face haut (767)
         let seq = self.sequence + 1;
         self.sequence = seq;
         let mut b = Vec::new();
         write_varint(0, &mut b); // main hand
-        write_position(tx, fy + 1, tz, &mut b);
+        write_position(cx, cy, cz, &mut b);
         write_varint(1, &mut b); // face haut
         b.extend_from_slice(&0.5f32.to_be_bytes());
         b.extend_from_slice(&0.5f32.to_be_bytes());
         b.extend_from_slice(&0.5f32.to_be_bytes());
         b.push(0); // insideBlock
-        b.push(0); // worldBorderHit
         write_varint(seq, &mut b);
-        // use_item_on = block_place packet 0x42 en 775
         if self.conn.send(ids::play_s::BLOCK_PLACE, &b).await.is_err() {
             return false;
         }
@@ -232,11 +249,26 @@ impl Bot {
     }
 
     /// Sélectionne dans la hotbar le slot contenant l'item donné.
-    pub async fn select_hotbar_by_item(&mut self, item: i32) {
-        if let Some(slot) = self.inventory.find(item) {
-            let hotbar = slot.min(8);
-            self.select_hotbar(hotbar).await.ok();
+    /// Si l'item est hors hotbar, le déplace par clics vers un slot libre.
+    pub async fn select_hotbar_by_item(&mut self, item: i32) -> bool {
+        let Some(slot) = self.inventory.find(item) else { return false; };
+        if (crate::inventory::HOTBAR_FIRST..=crate::inventory::HOTBAR_LAST).contains(&slot) {
+            self.select_hotbar(slot - crate::inventory::HOTBAR_FIRST).await.ok();
+            return true;
         }
+        let Some(target) = (crate::inventory::HOTBAR_FIRST..=crate::inventory::HOTBAR_LAST)
+            .find(|&i| self.inventory.slots.get(i).map(|s| s.is_none()).unwrap_or(false))
+        else { return false; };
+        if self.click_slot(slot as i16).await.is_err() {
+            return false;
+        }
+        for _ in 0..20 { self.drain_packets().await; }
+        if self.click_slot(target as i16).await.is_err() {
+            return false;
+        }
+        for _ in 0..20 { self.drain_packets().await; }
+        self.select_hotbar(target - crate::inventory::HOTBAR_FIRST).await.ok();
+        self.inventory.held(target - crate::inventory::HOTBAR_FIRST).map(|s| s.id) == Some(item)
     }
 
     /// Affiche l'inventaire (debug).
@@ -275,7 +307,7 @@ impl Bot {
             tries += 1;
             // Chercher de plus en plus loin
             let radius = 20 + tries * 10;
-            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80) as i32) {
+            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80)) {
                 println!("tronc trouvé en ({}, {}, {}) dist~{}, minage...", x, y, z, radius);
                 self.goto_and_dig(x, y, z).await;
                 // Miner aussi les blocs au-dessus (tronc vertical)
@@ -294,7 +326,7 @@ impl Bot {
                     let angle = (tries as f64) * 2.4;
                     let tx = (p[0] + angle.cos() * 30.0) as i32;
                     let tz = (p[2] + angle.sin() * 30.0) as i32;
-                    let ty = (p[1] as i32).max(62).min(120);
+                    let ty = (p[1] as i32).clamp(62, 120);
                     self.goto(tx, ty, tz).await;
                     for _ in 0..100 {
                         if self.path_len() == 0 { break; }
@@ -315,13 +347,12 @@ impl Bot {
         }
 
         // Crafter une table de craft
-        if self.count_item("crafting_table") == 0 {
-            if !self.craft("crafting_table").await {
+        if self.count_item("crafting_table") == 0
+            && !self.craft("crafting_table").await {
                 // Essayer avec d'autres planches
                 self.craft("spruce_planks").await;
                 self.craft("crafting_table").await;
             }
-        }
         if self.count_item("crafting_table") == 0 {
             eprintln!("impossible de crafter une table");
             return false;

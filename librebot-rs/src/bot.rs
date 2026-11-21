@@ -36,8 +36,9 @@ pub(crate) mod ids {
         pub const PONG: i32 = 0x05;
         pub const SELECT_KNOWN_PACKS: i32 = 0x07;
     }
+    #[allow(dead_code)]
     pub mod play_c {
-        // IDs protocole 767 (Minecraft 1.21.1) — valeurs originales validées
+        // IDs protocole 767 (Minecraft 1.21.1) — source : minecraft-data
         pub const WINDOW_ITEMS: i32 = 0x13;
         pub const BLOCK_CHANGE: i32 = 0x09;
         pub const SET_SLOT: i32 = 0x15;
@@ -51,39 +52,40 @@ pub(crate) mod ids {
         pub const SYSTEM_CHAT: i32 = 0x6c;
         pub const PLAYER_CHAT: i32 = 0x39;
         pub const PLAYER_INFO: i32 = 0x3e;
-        pub const SET_HEALTH: i32 = 0x59;
-        pub const EXPERIENCE: i32 = 0x58;
-        pub const GAME_EVENT: i32 = 0x1e;
-        pub const RESPAWN: i32 = 0x41;
-        pub const DECLARE_RECIPES: i32 = 0x6d;
-        pub const OPEN_WINDOW: i32 = 0x2e;
-        pub const CLOSE_WINDOW: i32 = 0x13;
+        pub const SET_HEALTH: i32 = 0x5d;
+        pub const EXPERIENCE: i32 = 0x5c;
+        pub const GAME_EVENT: i32 = 0x22;
+        pub const RESPAWN: i32 = 0x47;
+        pub const DECLARE_RECIPES: i32 = 0x77;
+        pub const OPEN_WINDOW: i32 = 0x33;
+        pub const CLOSE_WINDOW: i32 = 0x12;
         pub const CHUNK_BATCH_START: i32 = 0x0d;
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0c;
-        pub const MULTI_BLOCK_CHANGE: i32 = 0x3c;
-        pub const SET_DEFAULT_SPAWN: i32 = 0x4b;
-        pub const UPDATE_VIEW_POSITION: i32 = 0x4a;
-        pub const UPDATE_VIEW_DISTANCE: i32 = 0x4d;
+        pub const MULTI_BLOCK_CHANGE: i32 = 0x49;
+        pub const SET_DEFAULT_SPAWN: i32 = 0x56;
+        pub const UPDATE_VIEW_POSITION: i32 = 0x54;
+        pub const UPDATE_VIEW_DISTANCE: i32 = 0x55;
         pub const SET_TIME: i32 = 0x64;
-        pub const SET_ENTITY_DATA: i32 = 0x52;
+        pub const SET_ENTITY_DATA: i32 = 0x58;
     }
+    #[allow(dead_code)]
     pub mod play_s {
-        // IDs serverbound 767
+        // IDs serverbound 767 — source : minecraft-data
         pub const TELEPORT_CONFIRM: i32 = 0x00;
-        pub const ATTACK: i32 = 0x01;
+        pub const USE_ENTITY: i32 = 0x16;
         pub const CHAT_MESSAGE: i32 = 0x06;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
         pub const WINDOW_CLICK: i32 = 0x0e;
         pub const CONTAINER_CLOSE: i32 = 0x0f;
+        pub const FLYING: i32 = 0x1d;
         pub const POSITION_LOOK: i32 = 0x1b;
         pub const POSITION: i32 = 0x1a;
-        pub const CRAFT_RECIPE: i32 = 0x1d;
+        pub const CRAFT_RECIPE: i32 = 0x22;
         pub const BLOCK_DIG: i32 = 0x24;
-        pub const PLAYER_LOADED: i32 = 0x2c;
         pub const HELD_ITEM_SLOT: i32 = 0x2f;
         pub const BLOCK_PLACE: i32 = 0x38;
-        pub const USE_ITEM: i32 = 0x2e;
-        pub const SWING: i32 = 0x2d;
+        pub const USE_ITEM: i32 = 0x39;
+        pub const SWING: i32 = 0x36;
         pub const KEEP_ALIVE: i32 = 0x18;
     }
 }
@@ -259,8 +261,9 @@ impl Bot {
     pub async fn play_turn(&mut self) -> std::io::Result<Event> {
         loop {
             let pkt = self.conn.read_packet().await?;
-            if let Packet(id, body) = &pkt {
-                if *id != 0x2c && *id != 0x35 { // pas keep_alive ni held_item
+            let debug = debug_enabled();
+            if debug {
+                if let Packet(id, body) = &pkt {
                     eprintln!("[pkt] 0x{:02x} ({} o)", id, body.len());
                 }
             }
@@ -287,10 +290,13 @@ impl Bot {
                     self.chunks_in_batch = 0;
                 }
                 Packet(ids::play_c::MAP_CHUNK, body) => {
-                    eprintln!("[chunk] reçu {} octets", body.len());
                     self.chunks_in_batch += 1;
                     match self.world.apply_map_chunk(&body) {
-                        Ok(()) => eprintln!("[chunk] OK ({} octets, {} chunks total)", body.len(), self.world.chunk_count()),
+                        Ok(()) => {
+                            if debug {
+                                eprintln!("[chunk] OK ({} octets, {} chunks total)", body.len(), self.world.chunk_count());
+                            }
+                        }
                         Err(e) => eprintln!("[chunk] ERREUR ({} octets): {} — hex: {:02x?}", body.len(), e, &body[..body.len().min(60)]),
                     }
                 }
@@ -345,30 +351,19 @@ impl Bot {
                     let reason = chat_reason(&body);
                     return Ok(Event::Disconnected(reason));
                 }
-                // declare_recipes (0x85 en 775) : liste des recettes {name, items}
+                // declare_recipes (0x77 en 767) : { count, [ name, type, data... ] }
                 Packet(ids::play_c::DECLARE_RECIPES, body) => {
-                    let mut b = Body(&body);
-                    let n = b.varint().max(0) as usize;
-                    for _ in 0..n {
-                        let name = b.string();
-                        let n_items = b.varint().max(0) as usize;
-                        for _ in 0..n_items { b.varint(); }
-                        self.recipes.push(name);
-                    }
-                    // stonecutter recipes (on les ignore)
-                    let _n_sc = b.varint().max(0) as usize;
+                    self.declare_recipes(&body);
                 }
-                // open_window (0x3b en 775) : ouverture d'une fenêtre (table, fourneau...)
+                // open_window (0x33 en 767) : windowId (varint), type (varint), titre (NBT)
                 Packet(ids::play_c::OPEN_WINDOW, body) => {
                     let mut b = Body(&body);
-                    let window_id = b.u8();
+                    let window_id = b.varint();
                     let _window_type = b.varint();
-                    let _title_len = b.varint();
-                    // skip title NBT/string
                     let _ = crate::nbt::parse(&mut b.0);
-                    self.open_window_id = Some(window_id);
+                    self.open_window_id = u8::try_from(window_id).ok();
                 }
-                // close_window (0x11 en 775)
+                // close_window (0x12 en 767)
                 Packet(ids::play_c::CLOSE_WINDOW, body) => {
                     let mut b = Body(&body);
                     let _window_id = b.u8();
@@ -379,9 +374,28 @@ impl Bot {
         }
     }
 
+    /// declare_recipes (0x77) : compte, puis par recette { nom, type, données typées }.
+    fn declare_recipes(&mut self, body: &[u8]) {
+        let mut b = Body(body);
+        let n = b.varint().max(0) as usize;
+        for _ in 0..n {
+            let name = b.string();
+            let rtype = b.varint();
+            if !skip_recipe_data(&mut b, rtype) {
+                eprintln!("[recipes] type {} non supporté à {}", rtype, name);
+                self.recipes.push(name);
+                break;
+            }
+            self.recipes.push(name);
+        }
+        if debug_enabled() {
+            eprintln!("[recipes] {} recettes déclarées", self.recipes.len());
+        }
+    }
+
     /// Paquet `login` (0x2b) : entityId, dimension, etc.
     fn apply_login(&mut self, body: &[u8]) {
-        let mut b = Body(&body);
+        let mut b = Body(body);
         self.entity_id = Some(b.i32());
         let _hardcore = b.bool();
         let n_worlds = b.varint() as usize;
@@ -419,7 +433,7 @@ impl Bot {
 
     /// Paquet `position` (0x40) : renvoie l'ID de téléport à confirmer.
     fn apply_position(&mut self, body: &[u8]) -> Option<i32> {
-        let mut b = Body(&body);
+        let mut b = Body(body);
         let x = b.f64();
         let y = b.f64();
         let z = b.f64();
@@ -491,9 +505,6 @@ impl Bot {
         };
         let seq = self.sequence + 1;
         self.sequence = seq;
-        let mut slot = Vec::new();
-        slot.extend_from_slice(&0i16.to_be_bytes());
-        self.conn.send(ids::play_s::HELD_ITEM_SLOT, &slot).await?;
         let mut b = Vec::new();
         crate::protocol::write_varint(0, &mut b);
         crate::protocol::write_position(x, y, z, &mut b);
@@ -660,16 +671,79 @@ impl Bot {
         b.push(0); // signature: None (option bool = false)
         crate::protocol::write_varint(0, &mut b); // offset
         b.extend_from_slice(&[0u8; 3]); // acknowledged (3 bytes)
-        b.push(0); // checksum (u8) — protocole 775
         self.conn.send(ids::play_s::CHAT_MESSAGE, &b).await
     }
+}
+
+fn debug_enabled() -> bool {
+    static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DBG.get_or_init(|| std::env::var_os("LIBREBOT_DEBUG").is_some())
+}
+
+/// Saute les données d'une recette declare_recipes selon son type (protocole 767).
+/// Retourne false si le type (ou un ingrédient) est indécodable.
+fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
+    match rtype {
+        0 => {
+            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, notification
+            let _group = b.string();
+            let _category = b.varint();
+            let w = b.varint().max(0) as usize;
+            let h = b.varint().max(0) as usize;
+            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b)) && skip_slot(b)
+        }
+        1 => {
+            // crafting_shapeless : group, category, n ingrédients, résultat
+            let _group = b.string();
+            let _category = b.varint();
+            let n = b.varint().max(0) as usize;
+            (0..n).all(|_| skip_ingredient(b)) && skip_slot(b)
+        }
+        2..=15 | 23 => {
+            // recettes spéciales (teinture, réparation...) : catégorie seule
+            let _category = b.varint();
+            true
+        }
+        16..=19 => {
+            // smelting/blasting/smoking/campfire : group, cat, ingrédient, résultat, xp, temps
+            let _group = b.string();
+            let _category = b.varint();
+            skip_ingredient(b) && skip_slot(b) && {
+                let _exp = b.f32();
+                let _time = b.varint();
+                true
+            }
+        }
+        20 => {
+            // stonecutting : group, ingrédient, résultat
+            let _group = b.string();
+            skip_ingredient(b) && skip_slot(b)
+        }
+        21 | 22 => {
+            // smithing_transform / smithing_trim : template, base, addition (+ résultat si transform)
+            skip_ingredient(b)
+                && skip_ingredient(b)
+                && skip_ingredient(b)
+                && (rtype != 21 || skip_slot(b))
+        }
+        _ => false,
+    }
+}
+
+fn skip_ingredient(b: &mut Body) -> bool {
+    let n = b.varint().max(0) as usize;
+    (0..n).all(|_| skip_slot(b))
+}
+
+fn skip_slot(b: &mut Body) -> bool {
+    crate::inventory::skip_slot(b)
 }
 
 /// Paquet `player_chat` (0x39) : "<pseudo> message" (best effort).
 /// Suppose le chat type référencé par ID (registre synchronisé en configuration).
 fn parse_player_chat(body: &[u8]) -> Option<String> {
-    let mut b = Body(&body);
-    let _sender_uuid = b.string();
+    let mut b = Body(body);
+    let _sender_uuid = b.take(16);
     let _index = b.varint();
     if b.bool() {
         b.take(256);
@@ -677,10 +751,10 @@ fn parse_player_chat(body: &[u8]) -> Option<String> {
     let message = b.string();
     let _timestamp = b.i64();
     let _salt = b.i64();
-    let previous = b.varint() as usize;
+    let previous = b.varint().max(0) as usize;
     for _ in 0..previous {
-        let id = b.varint();
-        if id == 0 {
+        let _id = b.varint();
+        if b.bool() {
             b.take(256);
         }
     }
@@ -703,19 +777,18 @@ fn parse_player_chat(body: &[u8]) -> Option<String> {
 }
 
 fn chat_reason(body: &[u8]) -> String {
-    // Essayer d'abord comme une string préfixée par VarInt (format texte brut)
-    let mut b = Body(&body);
-    let as_string = b.string();
-    if !as_string.is_empty() && as_string.len() < 1000 {
-        return as_string;
-    }
-    // Sinon essayer NBT (composant de chat)
+    // Composant de chat = NBT en 767 : essayer NBT d'abord, puis string brute
     let mut buf: &[u8] = body;
     if let Some(n) = nbt::parse(&mut buf) {
         let t = nbt::text(&n);
         if !t.is_empty() {
             return t;
         }
+    }
+    let mut b = Body(body);
+    let as_string = b.string();
+    if !as_string.is_empty() && as_string.len() < 1000 {
+        return as_string;
     }
     // Dernier recours : hex dump
     format!("<raison illisible: {} octets>", body.len())

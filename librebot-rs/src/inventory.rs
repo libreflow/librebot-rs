@@ -1,9 +1,16 @@
 //! Inventaire du joueur (fenêtre 0) : slots, set_slot, clics.
-//! Slots vanilla : 0-8 hotbar, 9-35 stockage, 36-39 armure, 40 off-hand.
+//! Layout vanilla fenêtre 0 : 0 résultat craft, 1-4 grille 2x2, 5-8 armure,
+//! 9-35 stockage, 36-44 hotbar, 45 main secondaire.
 
+use crate::nbt;
 use crate::protocol::Body;
 
-pub const HOTBAR_SLOTS: usize = 9;
+pub const HOTBAR_FIRST: usize = 36;
+pub const HOTBAR_LAST: usize = 44;
+pub const OFFHAND: usize = 45;
+pub const STORAGE_FIRST: usize = 9;
+/// Nombre de slots joueur dans une fenêtre de conteneur (27 stockage + 9 hotbar + 1 offhand).
+const PLAYER_SECTION: usize = 37;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemStack {
@@ -16,6 +23,8 @@ pub struct Inventory {
     pub slots: Vec<Option<ItemStack>>,
     pub state_id: i32,
     pub carried: Option<ItemStack>,
+    /// Dernière fenêtre non-joueur lue (id, nombre de slots) — pour mapper set_slot.
+    last_container: Option<(u8, usize)>,
 }
 
 /// Erreur de décodage : l'inventaire reste utilisable partiellement.
@@ -29,50 +38,92 @@ impl Inventory {
         Self::default()
     }
 
-    /// Paquet `window_items` (0x13) : remplace tout l'inventaire.
+    /// Paquet `window_items` (0x13) : remplace l'inventaire.
     pub fn apply_window_items(&mut self, body: &[u8]) -> Result<(), InventoryError> {
         let mut b = Body(body);
-        let _window_id = b.u8();
+        let window_id = b.u8();
         self.state_id = b.varint();
-        let n = b.varint() as usize;
-        let mut slots = Vec::with_capacity(n);
+        let n = b.varint().max(0) as usize;
+        let mut external: Vec<Option<ItemStack>> = Vec::with_capacity(n);
         for i in 0..n {
             match read_slot(&mut b) {
-                Some(s) => slots.push(s),
+                Some(s) => external.push(s),
                 None => return Err(InventoryError::SlotWithComponents(i)),
             }
         }
         self.carried = read_slot(&mut b).flatten();
-        self.slots = slots;
+        if window_id == 0 {
+            self.slots = external;
+        } else {
+            self.last_container = Some((window_id, n));
+            self.merge_container_slots(&external, n);
+        }
         Ok(())
     }
 
     /// Paquet `set_slot` (0x15) : remplace un slot.
     pub fn apply_set_slot(&mut self, body: &[u8]) -> Result<(), InventoryError> {
         let mut b = Body(body);
-        let _window_id = b.u8();
+        let window_id = b.u8();
         self.state_id = b.varint();
         let slot = b.i16() as i32;
         let item = read_slot(&mut b).flatten();
-        if slot >= 0 {
-            if (slot as usize) >= self.slots.len() {
-                self.slots.resize(slot as usize + 1, None);
-            }
-            self.slots[slot as usize] = item;
-        } else if slot == -1 {
+        if slot == -1 {
             self.carried = item;
+            return Ok(());
+        }
+        if slot < 0 {
+            return Ok(());
+        }
+        let internal = if window_id == 0 {
+            Some(slot as usize)
+        } else {
+            let n = match self.last_container {
+                Some((w, n)) if w == window_id => n,
+                _ => return Ok(()),
+            };
+            container_to_internal(slot as usize, n)
+        };
+        if let Some(idx) = internal {
+            if idx >= self.slots.len() {
+                self.slots.resize(idx + 1, None);
+            }
+            self.slots[idx] = item;
         }
         Ok(())
     }
 
-    pub fn held(&self, hotbar_index: usize) -> Option<&ItemStack> {
-        self.slots.get(hotbar_index).and_then(|s| s.as_ref())
+    /// Copie la section joueur d'une fenêtre de conteneur (ex: table de craft 3x3)
+    /// vers les slots internes. Les slots du conteneur lui-même sont ignorés.
+    fn merge_container_slots(&mut self, external: &[Option<ItemStack>], n: usize) {
+        for (e, item) in external.iter().enumerate() {
+            if let Some(internal) = container_to_internal(e, n) {
+                if internal >= self.slots.len() {
+                    self.slots.resize(internal + 1, None);
+                }
+                self.slots[internal] = item.clone();
+            }
+        }
     }
 
-    /// Premier slot (hotbar en priorité) contenant l'item donné.
+    pub fn held(&self, hotbar_index: usize) -> Option<&ItemStack> {
+        self.slots
+            .get(HOTBAR_FIRST + hotbar_index)
+            .and_then(|s| s.as_ref())
+    }
+
+    /// Slot interne contenant l'item donné (hotbar en priorité, puis stockage).
     pub fn find(&self, item_id: i32) -> Option<usize> {
-        (0..HOTBAR_SLOTS.min(self.slots.len()))
-            .chain(HOTBAR_SLOTS..self.slots.len())
+        let hotbar = (HOTBAR_FIRST..=HOTBAR_LAST).filter(|&i| i < self.slots.len());
+        let storage = (STORAGE_FIRST..HOTBAR_FIRST).filter(|&i| i < self.slots.len());
+        let hotbar_set = HOTBAR_FIRST..=HOTBAR_LAST;
+        let storage_set = STORAGE_FIRST..HOTBAR_FIRST;
+        let rest = (0..self.slots.len()).filter(|&i| {
+            !hotbar_set.contains(&i) && !storage_set.contains(&i)
+        });
+        hotbar
+            .chain(storage)
+            .chain(rest)
             .find(|&i| self.slots[i].as_ref().map(|s| s.id) == Some(item_id))
     }
 
@@ -86,21 +137,86 @@ impl Inventory {
     }
 }
 
-/// Décode un slot (protocole 767 / 1.21.1) : bool present ; si true → itemId(varint) + count(i8) + NBT.
+/// Mappe un slot de fenêtre conteneur (fenêtre != 0) vers l'index interne joueur.
+/// La section joueur est en fin de fenêtre : stockage, hotbar, offhand.
+/// Retourne None pour les slots appartenant au conteneur lui-même.
+fn container_to_internal(external: usize, window_len: usize) -> Option<usize> {
+    if window_len < PLAYER_SECTION {
+        return None;
+    }
+    let from_end = window_len - 1 - external;
+    match from_end {
+        0 => Some(OFFHAND),
+        1..=9 => Some(HOTBAR_FIRST + (9 - from_end)),
+        10..=36 => Some(STORAGE_FIRST + (36 - from_end)),
+        _ => None,
+    }
+}
+
+/// Décode un slot (protocole 767 / 1.21.1) :
+/// itemCount varint ; si > 0 : itemId varint, composants ajoutés, composants retirés.
 pub fn read_slot(b: &mut Body) -> Option<Option<ItemStack>> {
-    let present = b.bool();
-    if !present {
+    let count = b.varint();
+    if count == 0 {
         return Some(None);
     }
     let id = b.varint();
-    let count = b.u8() as i32; // count = i8 en 767
-    // Skip NBT (peut être présent)
-    let _ = crate::nbt::parse(&mut b.0);
+    let added = b.varint().max(0) as usize;
+    let removed = b.varint().max(0) as usize;
+    for _ in 0..added {
+        if !skip_component(b) {
+            return None;
+        }
+    }
+    for _ in 0..removed {
+        b.varint();
+    }
     Some(Some(ItemStack { id, count }))
 }
 
-/// Corps d'un clic de fenêtre : ramasser / poser un stack entier (mode 0)
-/// ou moitié (bouton 1). Item curseur supposé vide côté bot.
+/// Saute la charge utile d'un composant d'item (protocole 767).
+/// Retourne false pour les composants au format complexe non supporté.
+fn skip_component(b: &mut Body) -> bool {
+    let ctype = b.varint();
+    match ctype {
+        0 | 5 | 6 | 19 => nbt::parse(&mut b.0).is_some(),
+        1 | 2 | 3 | 13 | 16 | 24 | 25 | 26 | 41 => true,
+        4 | 18 | 21 => {
+            b.bool();
+            true
+        }
+        7 => {
+            let n = b.varint().max(0) as usize;
+            (0..n).all(|_| nbt::parse(&mut b.0).is_some())
+        }
+        9 | 23 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+                b.varint();
+            }
+            b.bool();
+            true
+        }
+        20 => {
+            b.varint();
+            let _ = b.f32();
+            b.bool();
+            true
+        }
+        14 | 15 | 17 | 28 => true,
+        _ => false,
+    }
+}
+
+/// Saute un slot complet (utilisé pour ignorer les ingrédients des recettes).
+/// Retourne false si le slot contient un composant non supporté.
+pub fn skip_slot(b: &mut Body) -> bool {
+    read_slot(b).is_some()
+}
+
+/// Corps d'un clic de fenêtre : ramasser / poser un stack entier (mode 0).
+/// Item curseur supposé vide côté bot.
 pub fn window_click_body(
     window_id: u8,
     state_id: i32,
@@ -117,4 +233,72 @@ pub fn window_click_body(
     crate::protocol::write_varint(0, &mut out); // changedSlots vide
     crate::protocol::write_varint(0, &mut out); // cursorItem vide
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::write_varint;
+
+    fn slot_bytes(id: Option<(i32, i32)>) -> Vec<u8> {
+        match id {
+            None => {
+                let mut b = Vec::new();
+                write_varint(0, &mut b);
+                b
+            }
+            Some((id, count)) => {
+                let mut b = Vec::new();
+                write_varint(count, &mut b);
+                write_varint(id, &mut b);
+                write_varint(0, &mut b); // composants ajoutés
+                write_varint(0, &mut b); // composants retirés
+                b
+            }
+        }
+    }
+
+    #[test]
+    fn lecture_slots_767() {
+        let mut body = Vec::new();
+        body.push(0); // window id
+        write_varint(0, &mut body); // state id
+        write_varint(3, &mut body); // 3 slots
+        body.extend_from_slice(&slot_bytes(None));
+        body.extend_from_slice(&slot_bytes(Some((324, 32)))); // item 324 x32
+        body.extend_from_slice(&slot_bytes(None));
+        body.extend_from_slice(&slot_bytes(None)); // carried vide
+        let mut inv = Inventory::new();
+        inv.apply_window_items(&body).unwrap();
+        assert_eq!(inv.slots.len(), 3);
+        assert_eq!(inv.slots[1].as_ref().map(|s| s.count), Some(32));
+        assert_eq!(inv.slots[1].as_ref().map(|s| s.id), Some(324));
+    }
+
+    #[test]
+    fn find_hotbar_prioritaire() {
+        let mut inv = Inventory::new();
+        inv.slots.resize(46, None);
+        inv.slots[10] = Some(ItemStack { id: 7, count: 1 }); // stockage
+        inv.slots[40] = Some(ItemStack { id: 7, count: 1 }); // hotbar
+        assert_eq!(inv.find(7), Some(40));
+        assert_eq!(inv.held(4).map(|s| s.id), Some(7));
+    }
+
+    #[test]
+    fn mapping_fenetre_conteneur() {
+        // Table 3x3 : 10 slots conteneur + 37 joueur
+        for e in 10..=46 {
+            let internal = container_to_internal(e, 47).unwrap();
+            assert!(
+                internal == OFFHAND || (STORAGE_FIRST..=HOTBAR_LAST).contains(&internal),
+                "e={} -> {:?}",
+                e,
+                internal
+            );
+        }
+        assert_eq!(container_to_internal(10, 47), Some(9)); // 1er slot joueur = début stockage
+        assert_eq!(container_to_internal(46, 47), Some(45)); // dernier = offhand
+        assert_eq!(container_to_internal(9, 47), None); // slot du conteneur
+    }
 }

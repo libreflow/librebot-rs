@@ -75,9 +75,7 @@ async fn mine_et_pose() {
         assert_eq!(loc_finish, (2, MIN_Y, 0));
         assert_eq!(seq_finish, seq, "séquence incohérente");
 
-        // Enfin la pose : held_item_slot puis block_place sur le sol devant.
-        let slot = expect(&mut conn, 0x2f).await;
-        assert_eq!(Body(&slot).u16(), 0);
+        // Enfin la pose : block_place sur le sol devant.
         let place = expect(&mut conn, 0x38).await;
         let mut b = Body(&place);
         assert_eq!(b.varint(), 0, "main");

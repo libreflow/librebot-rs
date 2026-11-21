@@ -71,12 +71,12 @@ impl World {
         let mut b = Body(body);
         let x = b.i32();
         let z = b.i32();
-        // heightmaps : array de {type: varint, data: array of i64} (plus de NBT en 775)
-        let hm_count = b.varint().max(0) as usize;
-        for _ in 0..hm_count {
-            let _hm_type = b.varint();
-            let n = b.varint().max(0) as usize;
-            for _ in 0..n { b.i64(); }
+        // heightmaps : composant NBT anonyme (protocole 767)
+        if crate::nbt::parse(&mut b.0).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "heightmaps NBT illisibles",
+            ));
         }
         // chunkData : ByteArray (varint length + bytes)
         let size = b.varint().max(0) as usize;
@@ -96,15 +96,14 @@ impl World {
     /// Paquet `unload_chunk` (0x21).
     pub fn apply_unload_chunk(&mut self, body: &[u8]) {
         let mut b = Body(body);
-        let mut z = b.i32();
-        let mut x = b.i32();
-        core::mem::swap(&mut x, &mut z);
+        let x = b.i32();
+        let z = b.i32();
         self.chunks.remove(&(x, z));
     }
 
     /// ID d'état du bloc aux coordonnées monde. `None` si chunk non chargé ou hors monde.
     pub fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u32> {
-        if y < MIN_Y || y >= MIN_Y + WORLD_HEIGHT {
+        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
             return None;
         }
         let chunk = self.chunks.get(&(x >> 4, z >> 4))?;
@@ -126,7 +125,7 @@ impl World {
     /// Remplace l'état d'un bloc (paquet `block_change` et pose future).
     /// La section est reconstruite en stockage direct 15 bits.
     pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        if y < MIN_Y || y >= MIN_Y + WORLD_HEIGHT {
+        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
             return false;
         }
         let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {

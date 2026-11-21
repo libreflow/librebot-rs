@@ -54,7 +54,7 @@ async fn inventaire_hotbar_et_click() {
         conn.send(0x2b, &login_body(7)).await.unwrap();
         conn.send(0x27, &floor_chunk_body(0, 0, None)).await.unwrap();
 
-        conn.send(0x13, &window_items_body(7, &[(0, 1, 64), (9, 5, 3)]))
+        conn.send(0x13, &window_items_body(7, &[(36, 1, 64), (9, 5, 3)]))
             .await
             .unwrap();
 
@@ -108,7 +108,7 @@ async fn inventaire_hotbar_et_click() {
     assert_eq!(bot.inventory.slots.len(), 46);
     assert_eq!(bot.inventory.state_id, 7);
     assert_eq!(bot.inventory.count(1), 64, "64 stone attendus");
-    assert_eq!(bot.inventory.find(1), Some(0), "stone dans la hotbar");
+    assert_eq!(bot.inventory.find(1), Some(36), "stone dans la hotbar");
     assert_eq!(
         bot.inventory.held(0).map(|s| (s.id, s.count)),
         Some((1, 64))
@@ -120,10 +120,7 @@ async fn inventaire_hotbar_et_click() {
     let mut updated = false;
     while Instant::now() < deadline && !updated {
         let disconnected = tokio::select! {
-            ev = bot.play_turn() => match ev.unwrap() {
-                Event::Disconnected(_) => true,
-                _ => false,
-            },
+            ev = bot.play_turn() => matches!(ev.unwrap(), Event::Disconnected(_)),
             _ = tokio::time::sleep(Duration::from_millis(25)) => {
                 bot.tick(0.05).await.unwrap();
                 false
