@@ -94,7 +94,7 @@ impl Bot {
         // Le serveur n'accepte le minage que dans un rayon de 4,5 blocs
         // autour des yeux : s'approcher jusqu'à être à portée.
         let mut proche = false;
-        for approche in 0..3 {
+        for _approche in 0..3 {
             let Some(p) = self.pos else { return false };
             let dx = p[0] - (x as f64 + 0.5);
             let dy = p[1] + 1.62 - (y as f64 + 0.5);
@@ -348,10 +348,12 @@ impl Bot {
         println!("=== Phase 1 : Bois === ({} chunks chargés)", self.world.chunk_count());
         let logs = ["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log"];
 
-        // Attendre que les chunks autour du spawn soient chargés (min 25 chunks, max 15s)
-        for _ in 0..150 {
+        // Attendre que des chunks autour du spawn soient chargés.
+        // Serveurs lents (Aternos) : borne en TEMPS, pas en itérations
+        // (chaque drain peut durer jusqu'à 15 s si le flux est continu).
+        let debut = std::time::Instant::now();
+        while self.world.chunk_count() < 12 && debut.elapsed() < std::time::Duration::from_secs(90) {
             self.drain_packets().await;
-            if self.world.chunk_count() >= 25 { break; }
         }
         println!("chunks chargés: {}", self.world.chunk_count());
 

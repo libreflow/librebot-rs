@@ -133,6 +133,8 @@ pub struct Bot {
     pub(crate) chunks_in_batch: i32,
     /// Blocs hors de portée/inaccessibles récemment : on ne les re-cible pas.
     pub failed_targets: Vec<(i32, i32, i32)>,
+    /// Distance de vue déclarée au serveur (chunks).
+    pub view_distance: i8,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -141,6 +143,17 @@ pub struct Bot {
 
 impl Bot {
     pub async fn connect(host: &str, port: u16, username: &str) -> std::io::Result<Self> {
+        Self::connect_with_view(host, port, username, 8).await
+    }
+
+    /// Comme `connect` avec une distance de vue personnalisée (2-32).
+    /// Sur un serveur lent, une petite distance accélère le chargement du monde.
+    pub async fn connect_with_view(
+        host: &str,
+        port: u16,
+        username: &str,
+        view_distance: i8,
+    ) -> std::io::Result<Self> {
         let stream = TcpStream::connect((host, port)).await?;
         let mut conn = Conn::new(stream);
 
@@ -207,10 +220,12 @@ impl Bot {
                         open_window_id: None,
                         chunks_in_batch: 0,
                         failed_targets: Vec::new(),
+                        view_distance: 8,
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
                     };
+                    bot.view_distance = view_distance.clamp(2, 32);
                     bot.configuration().await?;
                     return Ok(bot);
                 }
@@ -257,7 +272,7 @@ impl Bot {
                         .await?;
                     let mut settings = Vec::new();
                     write_string("fr_FR", &mut settings);   // locale
-                    settings.push(8);                        // viewDistance (i8)
+                    settings.push(self.view_distance as u8);   // viewDistance (i8)
                     crate::protocol::write_varint(0, &mut settings); // chatFlags
                     settings.push(1);                        // chatColors
                     settings.push(0x7f);                     // skinParts (u8)
