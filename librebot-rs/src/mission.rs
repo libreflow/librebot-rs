@@ -267,7 +267,7 @@ impl Bot {
     }
 
     /// Cherche une cellule libre (solide dessous, air dessus) à proximité.
-    fn find_free_cell_near(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
+    pub(crate) fn find_free_cell_near(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
         for dist in 1..=3 {
             for (dx, dz) in [(dist, 0), (-dist, 0), (0, dist), (0, -dist), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
                 let (cx, cz) = (x + dx, z + dz);
@@ -529,12 +529,20 @@ impl Bot {
         println!("Raw iron: {}", self.count_item("raw_iron"));
         if self.count_item("raw_iron") < 5 { return false; }
 
-        // Fondre le fer dans le fourneau (simplifié : on suppose qu'on a un fourneau posé)
-        // TODO: ouvrir le fourneau et fondre
-        // Pour l'instant, on crafte directement si on a assez de fer
-        if self.count_item("iron_ingot") < 5 {
-            eprintln!("pas assez de lingots de fer (fondage fourneau pas encore implémenté)");
-            // Le fondage sera ajouté quand on posera un fourneau
+        // Fondre le minerai au fourneau (implémenté dans le module survie)
+        let carburant = if self.count_item("coal") > 0 {
+            "coal"
+        } else if self.count_item("oak_planks") > 0 {
+            "oak_planks"
+        } else if self.count_item("spruce_planks") > 0 {
+            "spruce_planks"
+        } else {
+            self.craft("oak_planks").await;
+            "oak_planks"
+        };
+        let besoin = (5 - self.count_item("iron_ingot")).min(self.count_item("raw_iron"));
+        if besoin > 0 {
+            self.smelt("raw_iron", carburant, "iron_ingot", besoin).await;
         }
 
         self.craft("iron_pickaxe").await;

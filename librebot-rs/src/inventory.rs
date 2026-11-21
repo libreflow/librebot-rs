@@ -25,6 +25,8 @@ pub struct Inventory {
     pub carried: Option<ItemStack>,
     /// Dernière fenêtre non-joueur lue (id, nombre de slots) — pour mapper set_slot.
     last_container: Option<(u8, usize)>,
+    /// Slots du conteneur de la fenêtre ouverte (ex: 0-2 d'un fourneau).
+    pub container_slots: Vec<Option<ItemStack>>,
 }
 
 /// Erreur de décodage : l'inventaire reste utilisable partiellement.
@@ -56,6 +58,8 @@ impl Inventory {
             self.slots = external;
         } else {
             self.last_container = Some((window_id, n));
+            let conteneur = n.saturating_sub(PLAYER_SECTION);
+            self.container_slots = external[..conteneur].to_vec();
             self.merge_container_slots(&external, n);
         }
         Ok(())
@@ -233,6 +237,15 @@ pub fn window_click_body(
     crate::protocol::write_varint(0, &mut out); // changedSlots vide
     crate::protocol::write_varint(0, &mut out); // cursorItem vide
     out
+}
+
+/// Slot fenêtre (conteneur de taille window_len) d'un slot interne joueur.
+pub fn internal_to_window_slot(internal: usize, window_len: usize) -> Option<i16> {
+    let wslot = internal as i64 + window_len as i64 - 46;
+    if wslot < 0 || wslot > i16::MAX as i64 {
+        return None;
+    }
+    Some(wslot as i16)
 }
 
 #[cfg(test)]

@@ -90,7 +90,7 @@ impl World {
             let _block_count = data.u16();
             let blocs_bits = data.0.first().copied().unwrap_or(255);
             let section_index = si_dbg;
-            let res = read_paletted(&mut data, SECTION_VOLUME, false);
+            let res = read_paletted(&mut data, false);
             let blocks = match res {
                 Ok(b) => b,
                 Err(e) => {
@@ -107,7 +107,7 @@ impl World {
                 }
             };
             let biomes_bits = data.0.first().copied().unwrap_or(255);
-            let _biomes = read_paletted(&mut data, 64, true)?;
+            let _biomes = read_paletted(&mut data, true)?;
             if crate::bot::debug_enabled() {
                 let n_non_air = (0..SECTION_VOLUME)
                     .filter(|&i| blocks.get(i, SECTION_VOLUME) != 0)
@@ -221,7 +221,7 @@ fn read_registry_value(b: &mut Body, registry: bool) -> i32 {
     id
 }
 
-fn read_paletted(b: &mut Body, count: usize, registry: bool) -> std::io::Result<Paletted> {
+fn read_paletted(b: &mut Body, registry: bool) -> std::io::Result<Paletted> {
     let bits = b.u8() as u32;
     if bits == 0 {
         return Ok(Paletted {
@@ -250,7 +250,6 @@ fn read_paletted(b: &mut Body, count: usize, registry: bool) -> std::io::Result<
             format!("bits par entrée invalide: {}", bits),
         ));
     }
-    let epl = 64 / bits as usize;
     // Le tableau de longs est préfixé par sa longueur (VarInt) : la lire
     // au lieu de la deviner, sinon tout le reste du chunk est désaligné.
     // Borner au contenu réellement disponible : un chunk maltraité ne doit

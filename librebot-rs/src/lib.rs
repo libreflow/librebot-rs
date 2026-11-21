@@ -1,6 +1,7 @@
 pub mod blocks_gen;
 pub mod bot;
 pub mod config;
+pub mod entities;
 pub mod inventory;
 pub mod items_gen;
 pub mod mission;
@@ -8,4 +9,5 @@ pub mod nbt;
 pub mod path;
 pub mod protocol;
 pub mod recipes;
+pub mod survie;
 pub mod world;

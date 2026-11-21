@@ -104,19 +104,10 @@ async fn session(bot: Bot) {
                     if let Some(p) = bot.pos {
                         println!("position du bot : ({:.0}, {:.0}, {:.0}) — /teleport {} pour le retrouver", p[0], p[1], p[2], bot.username);
                     }
-                    // Lancer la mission survie automatiquement
-                    println!("--- Démarrage de la mission survie ---");
-                    let r1 = bot.phase_wood().await;
-                    println!("Phase bois: {}", if r1 { "OK" } else { "ÉCHEC" });
-                    if r1 {
-                        let r2 = bot.phase_stone().await;
-                        println!("Phase pierre: {}", if r2 { "OK" } else { "ÉCHEC" });
-                        if r2 {
-                            let r3 = bot.phase_iron().await;
-                            println!("Phase fer: {}", if r3 { "OK" } else { "ÉCHEC" });
-                        }
-                    }
-                    println!("--- Mission terminée, bot en attente de commandes ---");
+                    // Mission survie autonome : boucle infinie gérée par le module survie
+                    println!("--- Démarrage de la mission survie autonome ---");
+                    bot.run_mission().await;
+                    println!("--- Mission arrêtée ---");
                 }
                 Ok(Event::Spawned) => {
                     // Le serveur renvoie ce paquet à chaque téléport corrective :

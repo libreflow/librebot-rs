@@ -6,6 +6,7 @@ use crate::nbt;
 use crate::protocol::Conn;
 use crate::protocol::ReadOutcome::{Eof, Packet};
 use crate::protocol::{offline_uuid, write_string, Body, MC_VERSION, PROTOCOL_VERSION};
+use crate::entities::Entities;
 use crate::path::find_path;
 use crate::world::World;
 use std::collections::VecDeque;
@@ -60,6 +61,11 @@ pub(crate) mod ids {
         pub const OPEN_WINDOW: i32 = 0x33;
         pub const CLOSE_WINDOW: i32 = 0x12;
         pub const CHUNK_BATCH_START: i32 = 0x0d;
+        pub const SPAWN_ENTITY: i32 = 0x01;
+        pub const REL_ENTITY_MOVE: i32 = 0x2e;
+        pub const ENTITY_MOVE_LOOK: i32 = 0x30;
+        pub const ENTITY_TELEPORT: i32 = 0x70;
+        pub const ENTITY_DESTROY: i32 = 0x42;
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0c;
         pub const MULTI_BLOCK_CHANGE: i32 = 0x49;
         pub const SET_DEFAULT_SPAWN: i32 = 0x56;
@@ -85,7 +91,9 @@ pub(crate) mod ids {
         pub const BLOCK_DIG: i32 = 0x24;
         pub const HELD_ITEM_SLOT: i32 = 0x2f;
         pub const BLOCK_PLACE: i32 = 0x38;
-        pub const USE_ITEM: i32 = 0x39;
+pub const USE_ITEM: i32 = 0x39;
+                pub const USE_ENTITY_ID: i32 = 0x16;
+                pub const SWING_ID: i32 = 0x36;
         pub const SWING: i32 = 0x36;
         pub const KEEP_ALIVE: i32 = 0x18;
     }
@@ -137,6 +145,11 @@ pub struct Bot {
     pub view_distance: i8,
     /// Le serveur s'est déconnecté (vu pendant un drain) : arrêter la mission.
     pub disconnected: bool,
+    /// Santé (0-20) et niveau de faim (0-20).
+    pub health: f32,
+    pub food: i32,
+    /// Entités connues autour du bot (animaux, items jetés, mobs).
+    pub entities: Entities,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -224,6 +237,9 @@ impl Bot {
                         failed_targets: Vec::new(),
                         view_distance: 8,
                         disconnected: false,
+                        health: 20.0,
+                        food: 20,
+                        entities: Entities::new(),
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
@@ -366,8 +382,9 @@ impl Bot {
                 Packet(ids::play_c::SET_HEALTH, body) => {
                     let mut b = Body(&body);
                     let hp = b.f32();
-                    let _food = b.varint();
+                    self.food = b.varint();
                     let _saturation = b.f32();
+                    self.health = hp;
                     if hp <= 0.0 {
                         self.dead = true;
                         self.path.clear();
@@ -407,6 +424,53 @@ impl Bot {
                     return Ok(Event::Disconnected(reason));
                 }
                 // declare_recipes (0x77 en 767) : { count, [ name, type, data... ] }
+                Packet(ids::play_c::RESPAWN, _) => {
+                    // Nouveau monde (mort ou portail) : purger les données locales,
+                    // le serveur renverra chunks et entités.
+                    self.entities.alive.clear();
+                    self.world = crate::world::World::new();
+                    self.path.clear();
+                    self.mining = None;
+                    self.failed_targets.clear();
+                }
+                Packet(ids::play_c::SPAWN_ENTITY, body) => {
+                    let mut b = Body(&body);
+                    let id = b.varint();
+                    let _uuid = b.take(16);
+                    let etype = b.varint();
+                    let x = b.f64();
+                    let y = b.f64();
+                    let z = b.f64();
+                    self.entities.spawn(id, etype, x, y, z);
+                }
+                Packet(
+                    ids::play_c::REL_ENTITY_MOVE | ids::play_c::ENTITY_MOVE_LOOK,
+                    body,
+                ) => {
+                    let mut b = Body(&body);
+                    let id = b.varint();
+                    let dx = b.i16() as f64 / 4096.0;
+                    let dy = b.i16() as f64 / 4096.0;
+                    let dz = b.i16() as f64 / 4096.0;
+                    self.entities.translate(id, dx, dy, dz);
+                }
+                Packet(ids::play_c::ENTITY_TELEPORT, body) => {
+                    let mut b = Body(&body);
+                    let id = b.varint();
+                    let x = b.f64();
+                    let y = b.f64();
+                    let z = b.f64();
+                    self.entities.teleport(id, x, y, z);
+                }
+                Packet(ids::play_c::ENTITY_DESTROY, body) => {
+                    let mut b = Body(&body);
+                    let n = b.varint().max(0) as usize;
+                    let mut ids = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        ids.push(b.varint());
+                    }
+                    self.entities.remove(&ids);
+                }
                 Packet(ids::play_c::DECLARE_RECIPES, body) => {
                     self.declare_recipes(&body);
                 }
@@ -753,6 +817,31 @@ impl Bot {
             self.world.set_block_state(x, y, z, 0);
         }
         Ok(())
+    }
+
+    /// Attaque une entité (serverbound use_entity, type 0) + animation de bras.
+    pub async fn attack_entity(&mut self, entity_id: i32) -> std::io::Result<()> {
+        let mut b = Vec::new();
+        crate::protocol::write_varint(entity_id, &mut b);
+        crate::protocol::write_varint(0, &mut b); // type = attaque
+        crate::protocol::write_varint(0, &mut b); // main hand
+        b.push(0); // sneaking = false
+        self.conn.send(ids::play_s::USE_ENTITY_ID, &b).await?;
+        let mut swing = Vec::new();
+        crate::protocol::write_varint(0, &mut swing);
+        self.conn.send(ids::play_s::SWING_ID, &swing).await
+    }
+
+    /// Consomme l'item tenu en main (serverbound use_item, avec rotation en 767).
+    pub async fn use_held_item(&mut self) -> std::io::Result<()> {
+        let seq = self.sequence + 1;
+        self.sequence = seq;
+        let mut b = Vec::new();
+        crate::protocol::write_varint(0, &mut b); // main hand
+        crate::protocol::write_varint(seq, &mut b);
+        b.extend_from_slice(&self.yaw.to_be_bytes());
+        b.extend_from_slice(&self.pitch.to_be_bytes());
+        self.conn.send(ids::play_s::USE_ITEM, &b).await
     }
 
     /// Ferme la fenêtre de conteneur ouverte (table de craft ouverte par la mission).
