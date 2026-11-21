@@ -81,6 +81,7 @@ impl World {
         // chunkData : ByteArray (varint length + bytes)
         let size = b.varint().max(0) as usize;
         let mut data = b.take(size);
+        let data_snapshot = data.rest().to_vec();
         let mut sections = Vec::with_capacity(SECTION_COUNT);
         if crate::bot::debug_enabled() {
             eprintln!("[chunk {},{}] hex debut data: {:02x?}", x, z, &data.rest()[..data.rest().len().min(2400)]);
@@ -98,6 +99,10 @@ impl World {
                         x, z, section_index, e,
                         &data.rest()[..data.rest().len().min(48)]
                     );
+                    let f = format!("/tmp/librebot_chunk_{}_{}.bin", x, z);
+                    if std::fs::write(&f, &data_snapshot).is_ok() {
+                        eprintln!("corps du chunk fautif sauvegardé : {}", f);
+                    }
                     return Err(e);
                 }
             };

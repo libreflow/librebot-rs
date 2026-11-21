@@ -135,6 +135,8 @@ pub struct Bot {
     pub failed_targets: Vec<(i32, i32, i32)>,
     /// Distance de vue déclarée au serveur (chunks).
     pub view_distance: i8,
+    /// Le serveur s'est déconnecté (vu pendant un drain) : arrêter la mission.
+    pub disconnected: bool,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -221,6 +223,7 @@ impl Bot {
                         chunks_in_batch: 0,
                         failed_targets: Vec::new(),
                         view_distance: 8,
+                        disconnected: false,
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
@@ -590,13 +593,20 @@ impl Bot {
         self.mining.is_none()
     }
 
-    /// Pas de simulation : avance du chemin, saut sur obstacle, gravité, contact au sol.
-    /// Lit et traite tous les paquets en attente sans bloquer (drain).
-    /// À appeler régulièrement pendant les actions longues pour garder le monde à jour.
+    /// Lit et traite les paquets en attente sans bloquer longtemps (drain).
+    /// À appeler pendant les actions longues pour garder le monde à jour.
+    /// Borné à ~500 ms réelles ; s'arrête dès que le serveur se déconnecte.
     pub async fn drain_packets(&mut self) {
-        // Lire jusqu'à 300 paquets ou timeout de 50ms sans données
+        let fin = std::time::Instant::now() + std::time::Duration::from_millis(500);
         for _ in 0..300 {
-            match tokio::time::timeout(std::time::Duration::from_millis(50), self.play_turn()).await {
+            if std::time::Instant::now() >= fin {
+                break;
+            }
+            match tokio::time::timeout(std::time::Duration::from_millis(20), self.play_turn()).await {
+                Ok(Ok(Event::Disconnected(_))) => {
+                    self.disconnected = true;
+                    break;
+                }
                 Ok(Ok(_)) => continue,
                 Ok(Err(_)) => break,
                 Err(_) => break, // timeout = plus rien en attente
@@ -714,6 +724,9 @@ impl Bot {
 
     /// Envoie les paquets différés par physics_tick — jamais annulé, jamais concurrent.
     pub async fn flush_pending(&mut self) -> std::io::Result<()> {
+        if self.disconnected {
+            return Ok(());
+        }
         if self.pending_respawn {
             self.pending_respawn = false;
             self.dead = false;

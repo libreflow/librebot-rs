@@ -91,6 +91,9 @@ impl Bot {
 
     /// Va vers un bloc et le mine. Retourne true si miné.
     pub async fn goto_and_dig(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if self.disconnected {
+            return false;
+        }
         // Le serveur n'accepte le minage que dans un rayon de 4,5 blocs
         // autour des yeux. Approche par étages : progresser vers le bloc
         // par segments de ~12 blocs (gère les fortes dénivelées, un A*
@@ -183,6 +186,7 @@ impl Bot {
         }
     }
 
+    #[allow(dead_code)]
     /// Trouve une position libre (solide en dessous, air au niveau pieds et tête) à côté d'un bloc.
     fn find_adjacent_free(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
         for (dx, dz) in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(1,-1),(-1,1)] {
@@ -459,6 +463,9 @@ impl Bot {
         self.craft("wooden_sword").await;
         self.close_window().await.ok();
 
+        if self.disconnected {
+            return false;
+        }
         self.dump_inventory();
         self.count_item("wooden_pickaxe") > 0
     }
