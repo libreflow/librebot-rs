@@ -75,6 +75,7 @@ pub(crate) mod ids {
         pub const USE_ENTITY: i32 = 0x16;
         pub const CHAT_MESSAGE: i32 = 0x06;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
+        pub const CLIENT_COMMAND: i32 = 0x09;
         pub const WINDOW_CLICK: i32 = 0x0e;
         pub const CONTAINER_CLOSE: i32 = 0x0f;
         pub const FLYING: i32 = 0x1d;
@@ -117,6 +118,8 @@ pub struct Bot {
     vy: f64,
     pub inventory: Inventory,
     pub on_ground: bool,
+    /// Santé : mort détectée (update_health <= 0) en attente de respawn.
+    pub dead: bool,
     /// Waypoints (x, z) au centre des blocs — chemin en cours.
     path: VecDeque<(f64, f64)>,
     /// Minage en cours : (x, y, z, secondes restantes, séquence, nom du bloc).
@@ -185,6 +188,7 @@ impl Bot {
                         vy: 0.0,
                         inventory: Inventory::new(),
                         on_ground: false,
+                        dead: false,
                         path: VecDeque::new(),
                         mining: None,
                         sequence: 0,
@@ -320,6 +324,18 @@ impl Bot {
                     }
                 }
                 Packet(ids::play_c::HELD_ITEM_SLOT_C, _) => {}
+                Packet(ids::play_c::SET_HEALTH, body) => {
+                    let mut b = Body(&body);
+                    let hp = b.f32();
+                    let _food = b.varint();
+                    let _saturation = b.f32();
+                    if hp <= 0.0 {
+                        self.dead = true;
+                        self.path.clear();
+                        self.mining = None;
+                        println!("le bot est mort, respawn en cours...");
+                    }
+                }
                 Packet(ids::play_c::POSITION, body) => {
                     let teleport_id = self.apply_position(&body);
                     if let Some(id) = teleport_id {
@@ -553,6 +569,15 @@ impl Bot {
     }
 
     pub async fn tick(&mut self, dt: f64) -> std::io::Result<()> {
+        if self.dead {
+            // client_command : perform_respawn (0) — sans quoi l'entité disparaît du monde
+            self.dead = false;
+            self.path.clear();
+            self.mining = None;
+            let mut b = Vec::new();
+            crate::protocol::write_varint(0, &mut b);
+            self.conn.send(ids::play_s::CLIENT_COMMAND, &b).await?;
+        }
         let Some(p) = self.pos else { return Ok(()) };
         let mut pos = p;
         let mut moved = false;

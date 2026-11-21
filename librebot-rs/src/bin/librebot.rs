@@ -66,6 +66,9 @@ async fn session(bot: Bot) {
             ev = bot.play_turn() => match ev {
                 Ok(Event::Connected) => {
                     println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id);
+                    if let Some(p) = bot.pos {
+                        println!("position du bot : ({:.0}, {:.0}, {:.0}) — /teleport {} pour le retrouver", p[0], p[1], p[2], bot.username);
+                    }
                     // Lancer la mission survie automatiquement
                     println!("--- Démarrage de la mission survie ---");
                     let r1 = bot.phase_wood().await;
