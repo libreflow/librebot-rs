@@ -157,6 +157,11 @@ impl Bot {
 
         loop {
             let pkt = conn.read_packet().await?;
+            if debug_enabled() {
+                if let Packet(id, body) = &pkt {
+                    eprintln!("[login] 0x{:02x} ({} o)", id, body.len());
+                }
+            }
             match pkt {
                 Eof => {
                     return Err(std::io::Error::new(
@@ -213,7 +218,13 @@ impl Bot {
 
     async fn configuration(&mut self) -> std::io::Result<()> {
         loop {
-            match self.conn.read_packet().await? {
+            let pkt = self.conn.read_packet().await?;
+            if debug_enabled() {
+                if let Packet(id, body) = &pkt {
+                    eprintln!("[config] 0x{:02x} ({} o) {:02x?}", id, body.len(), &body[..body.len().min(24)]);
+                }
+            }
+            match pkt {
                 Eof => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
@@ -405,7 +416,7 @@ impl Bot {
             let name = b.string();
             let rtype = b.varint();
             if !skip_recipe_data(&mut b, rtype) {
-                eprintln!("[recipes] type {} non supporté à {}", rtype, name);
+                eprintln!("[recipes] échec type {} à {}", rtype, name);
                 self.recipes.push(name);
                 break;
             }
@@ -742,15 +753,81 @@ fn debug_enabled() -> bool {
 
 /// Saute les données d'une recette declare_recipes selon son type (protocole 767).
 /// Retourne false si le type (ou un ingrédient) est indécodable.
+/// Vérifie qu'à cet endroit du flux commence bien une recette (nom plausible).
+fn recipe_boundary_ok(b: &Body) -> bool {
+    if b.rest().is_empty() {
+        return true;
+    }
+    let mut probe = Body(b.rest());
+    let len = probe.varint();
+    if !(8..=96).contains(&len) {
+        return false;
+    }
+    let name_start = varint_len_of(len);
+    if b.rest().len() < name_start + len as usize {
+        return false;
+    }
+    b.rest()[name_start..name_start + len as usize].starts_with(b"minecraft:")
+}
+
+fn varint_len_of(mut v: i32) -> usize {
+    let mut n = 1;
+    while v & !0x7f != 0 {
+        v >>= 7;
+        n += 1;
+    }
+    n
+}
+
+fn skip_smelting(b: &mut Body) -> bool {
+    let _group = b.string();
+    let _category = b.varint();
+    skip_ingredient(b)
+        && skip_slot(b)
+        && {
+            let _exp = b.f32();
+            let _time = b.varint();
+            true
+        }
+}
+
+fn skip_stonecutting(b: &mut Body) -> bool {
+    let _group = b.string();
+    skip_ingredient(b) && skip_slot(b)
+}
+
+fn skip_smithing_transform(b: &mut Body) -> bool {
+    skip_ingredient(b) && skip_ingredient(b) && skip_ingredient(b) && skip_slot(b)
+}
+
+fn skip_smithing_trim(b: &mut Body) -> bool {
+    skip_ingredient(b) && skip_ingredient(b) && skip_ingredient(b)
+}
+
+fn skip_simple_category(b: &mut Body) -> bool {
+    let category = b.varint();
+    (0..=7).contains(&category)
+}
+
+/// Saute les données d'une recette declare_recipes selon son type (protocole 767).
+/// L'ordre exact du registre (smelting → decorated_pot) varie selon vanilla/Paper :
+/// pour les types 15..=23, chaque format est essayé et validé contre la recette
+/// suivante du flux (nom "minecraft:..."), avec retour arrière en cas d'échec.
+/// Retourne false si aucun format ne s'applique.
 fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
     match rtype {
         0 => {
-            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, notification
+            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, showNotification
             let _group = b.string();
             let _category = b.varint();
             let w = b.varint().max(0) as usize;
             let h = b.varint().max(0) as usize;
-            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b)) && skip_slot(b)
+            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b))
+                && skip_slot(b)
+                && {
+                    b.bool(); // showNotification : valeur ignorée, octet à consommer
+                    true
+                }
         }
         1 => {
             // crafting_shapeless : group, category, n ingrédients, résultat
@@ -759,32 +836,27 @@ fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
             let n = b.varint().max(0) as usize;
             (0..n).all(|_| skip_ingredient(b)) && skip_slot(b)
         }
-        2..=15 | 23 => {
+        2..=14 => {
             // recettes spéciales (teinture, réparation...) : catégorie seule
-            let _category = b.varint();
-            true
+            skip_simple_category(b)
         }
-        16..=19 => {
-            // smelting/blasting/smoking/campfire : group, cat, ingrédient, résultat, xp, temps
-            let _group = b.string();
-            let _category = b.varint();
-            skip_ingredient(b) && skip_slot(b) && {
-                let _exp = b.f32();
-                let _time = b.varint();
-                true
+        15..=23 => {
+            let snapshot = b.0;
+            let formats: [fn(&mut Body) -> bool; 5] = [
+                skip_smelting,
+                skip_stonecutting,
+                skip_smithing_transform,
+                skip_smithing_trim,
+                skip_simple_category,
+            ];
+            for format in formats {
+                b.0 = snapshot;
+                if format(b) && recipe_boundary_ok(b) {
+                    return true;
+                }
             }
-        }
-        20 => {
-            // stonecutting : group, ingrédient, résultat
-            let _group = b.string();
-            skip_ingredient(b) && skip_slot(b)
-        }
-        21 | 22 => {
-            // smithing_transform / smithing_trim : template, base, addition (+ résultat si transform)
-            skip_ingredient(b)
-                && skip_ingredient(b)
-                && skip_ingredient(b)
-                && (rtype != 21 || skip_slot(b))
+            b.0 = snapshot;
+            false
         }
         _ => false,
     }
