@@ -59,7 +59,7 @@ impl Camp {
             let i = raw.find(&pat)? + pat.len();
             let rest = raw[i..].trim_start().strip_prefix(':')?.trim_start();
             let end = rest
-                .find(|c: char| c == ',' || c == '}')
+                .find([',', '}'])
                 .unwrap_or(rest.len());
             rest[..end].trim().parse().ok()
         };
@@ -108,35 +108,59 @@ impl Bot {
         // Palier 1 : le lit (laine 3 + planches 3)
         if !camp.lit {
             if self.count_item("white_wool") < 3 || self.count_item_any(&["oak_planks", "spruce_planks"]) < 3 {
-                self.hunt_wool(3).await;
+                self.announce("campement : je chasse les moutons pour la laine").await;
+                let ok = self.hunt_wool(3).await;
+                self.announce_result(
+                    ok,
+                    "j'ai assez de laine pour mon lit",
+                    "pas de moutons à l'horizon, le lit attendra",
+                )
+                .await;
+                if !ok {
+                    return; // quête suivante, sans boucler sur les moutons
+                }
             }
             if self.count_item("white_wool") >= 3
                 && self.count_item_any(&["oak_planks", "spruce_planks"]) >= 3
             {
-                if self.craft_avec_table("white_bed").await {
-                    if self.camp_place_item("white_bed", cx + 1, cy, cz + 1).await {
-                        if let Some(c) = self.camp.as_mut() {
-                            c.lit = true;
-                            c.save();
-                        }
-                        println!("campement : lit posé");
+                self.announce("campement : je fabrique mon lit").await;
+                let ok = self.craft_avec_table("white_bed").await
+                    && self.camp_place_item("white_bed", cx + 1, cy, cz + 1).await;
+                if ok {
+                    if let Some(c) = self.camp.as_mut() {
+                        c.lit = true;
+                        c.save();
                     }
+                    println!("campement : lit posé");
                 }
+                self.announce_result(
+                    ok,
+                    "mon lit est posé, je pourrai dormir ici",
+                    "échec de la pose du lit, j'essaierai plus tard",
+                )
+                .await;
             }
             return;
         }
 
         // Palier 2 : coffre de stockage (8 planches)
         if camp.coffres == 0 && self.count_item_any(&["oak_planks", "spruce_planks"]) >= 8 {
-            if self.craft_avec_table("chest").await
-                && self.camp_place_item("chest", cx - 1, cy, cz - 1).await
-            {
+            self.announce("campement : je fabrique un coffre de rangement").await;
+            let ok = self.craft_avec_table("chest").await
+                && self.camp_place_item("chest", cx - 1, cy, cz - 1).await;
+            if ok {
                 if let Some(c) = self.camp.as_mut() {
                     c.coffres = 1;
                     c.save();
                 }
                 println!("campement : coffre posé");
             }
+            self.announce_result(
+                ok,
+                "coffre de rangement installé",
+                "échec de la pose du coffre, j'essaierai plus tard",
+            )
+            .await;
         }
     }
 
@@ -275,6 +299,7 @@ impl Bot {
         let Some((bx, by, bz)) = self.find_block_any(LITS, 12) else {
             return false;
         };
+        self.announce("il fait nuit, je vais dormir au camp").await;
         eprintln!("nuit ({}) : dodo au lit ({}, {}, {})", self.day_time, bx, by, bz);
         if !self.approach_block(bx, by, bz).await {
             return false;
@@ -300,6 +325,12 @@ impl Bot {
             self.drain_packets().await;
             self.tick(0.25).await.ok();
         }
+        self.announce_result(
+            self.day_time < NUIT_DEBUT || self.day_time >= NUIT_FIN,
+            "bonjour ! nouvelle journée, au travail",
+            "j'ai pas réussi à dormir, je continue",
+        )
+        .await;
         true
     }
 
@@ -312,6 +343,7 @@ impl Bot {
         if occupes < seuil {
             return false;
         }
+        self.announce("mes poches débordent, je range au coffre").await;
         let Some((chx, chy, chz)) = self.find_block("chest", 16) else {
             return false;
         };
@@ -352,6 +384,11 @@ impl Bot {
             }
         }
         self.close_window().await.ok();
+        if ranges > 0 {
+            self.announce("rangé ! mon inventaire respire mieux").await;
+        } else {
+            self.announce("coffre plein ou rien à ranger, tant pis").await;
+        }
         ranges > 0
     }
 }

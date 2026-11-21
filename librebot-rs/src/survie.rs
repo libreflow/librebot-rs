@@ -367,8 +367,13 @@ impl Bot {
         if self.food >= 15 {
             return false;
         }
-        println!("faim à {} : on mange", self.food);
+        self.announce("j'ai faim, je mange quelque chose").await;
         let mange = self.eat_one_food().await;
+        if mange {
+            self.announce("repas terminé").await;
+        } else {
+            self.announce("rien à manger dans mes poches !").await;
+        }
         mange
     }
 
@@ -484,7 +489,28 @@ impl Bot {
         }
     }
 
+    /// Quête de secours quand la quête principale échoue : on reste utile
+    /// sans répéter la même quête qui vient d'échouer (chasse, cuisine, camp).
+    async fn quete_alternative(&mut self) {
+        let viandes: i32 = CRUS_CUISSON
+            .iter()
+            .map(|(crus, _)| self.inventory.count(item_id(crus)))
+            .sum();
+        if viandes > 0 {
+            self.announce("en attendant : je cuisine mes viandes").await;
+            self.cook_all_meats().await;
+        } else {
+            self.announce("en attendant : petite chasse").await;
+            let ok = self.hunt(2).await;
+            if !ok {
+                self.announce("aucun gibier non plus : je patiente").await;
+            }
+        }
+    }
+
     /// Boucle de survie autonome : phases de progression + entretien, à l'infini.
+    /// Chaque décision est annoncée dans le chat (sans spam) avec son résultat,
+    /// et un échec fait passer le bot à une autre quête.
     pub async fn run_mission(&mut self) {
         let mut echecs_consecutifs = 0;
         while !self.disconnected {
@@ -500,7 +526,14 @@ impl Bot {
                 self.camp = crate::camp::Camp::load();
             }
             if self.camp.is_none() {
-                self.ensure_camp().await;
+                self.announce("je cherche un endroit pour installer mon campement").await;
+                let ok = self.ensure_camp().await;
+                self.announce_result(
+                    ok,
+                    "campement installé, au travail !",
+                    "pas pu installer le campement, je verrai plus tard",
+                )
+                .await;
             }
             if self.camp.is_some() {
                 self.camp_expand().await;
@@ -522,28 +555,47 @@ impl Bot {
                     .map(|(_, cuit)| self.inventory.count(item_id(cuit)))
                     .sum();
                 if viandes > 0 {
+                    self.announce("je cuisine de la viande au fourneau").await;
                     self.cook_all_meats().await;
                 } else if cuites == 0 {
-                    if !self.hunt(4).await {
-                        println!("pas de gibier trouvé : pause");
-                    } else {
-                        // ramassage différé la prochaine itération
-                    }
+                    self.announce("partie de chasse !").await;
+                    let ok = self.hunt(4).await;
+                    self.announce_result(
+                        ok,
+                        "chasse fructueuse",
+                        "pas de gibier trouvé, je passe à une autre quête",
+                    )
+                    .await;
                 }
             } else if a_outil("stone_pickaxe") {
+                self.announce("je pars chercher du minerai de fer").await;
                 if self.phase_iron().await {
                     println!("=== Équipement en fer atteint ===");
+                    self.announce("équipement en fer atteint !").await;
                 } else {
                     echecs_consecutifs += 1;
+                    self.announce("pas trouvé de fer, je change de quête").await;
+                    self.quete_alternative().await;
                 }
             } else if a_outil("wooden_pickaxe") {
+                self.announce("je pars extraire de la pierre").await;
                 if self.phase_stone().await {
                     println!("=== Outillage pierre OK ===");
+                    self.announce("outillage en pierre terminé !").await;
                 } else {
                     echecs_consecutifs += 1;
+                    self.announce("pas trouvé de pierre, je change de quête").await;
+                    self.quete_alternative().await;
                 }
             } else {
-                self.phase_wood().await;
+                self.announce("je débute : récolte de bois").await;
+                let ok = self.phase_wood().await;
+                self.announce_result(
+                    ok,
+                    "premiers outils en bois fabriqués",
+                    "pas assez de bois autour, je cherche ailleurs",
+                )
+                .await;
             }
             if echecs_consecutifs >= 3 {
                 println!("phase bloquée 3 fois de suite : pause 2 min");

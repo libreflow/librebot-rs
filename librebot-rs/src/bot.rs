@@ -154,6 +154,9 @@ pub struct Bot {
     pub day_time: i64,
     /// Campement du bot, s'il en a établi un.
     pub camp: Option<crate::camp::Camp>,
+    /// Anti-spam chat : dernier instant d'envoi + dernier texte dit.
+    pub(crate) last_chat_at: Option<std::time::Instant>,
+    pub(crate) last_chat_text: Option<String>,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -246,6 +249,8 @@ impl Bot {
                         entities: Entities::new(),
                         day_time: 0,
                         camp: None,
+                        last_chat_at: None,
+                        last_chat_text: None,
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
@@ -888,6 +893,46 @@ impl Bot {
         crate::protocol::write_varint(0, &mut b); // offset
         b.extend_from_slice(&[0u8; 3]); // acknowledged (3 bytes)
         self.conn.send(ids::play_s::CHAT_MESSAGE, &b).await
+    }
+
+    /// Annonce une décision dans le chat SANS spammer :
+    /// - jamais deux messages à moins de 2,5 s d'intervalle ;
+    /// - jamais le même message répété à moins de 20 s d'intervalle.
+    ///
+    /// Les messages ignorés restent visibles dans la console locale.
+    pub async fn announce(&mut self, msg: &str) {
+        if self.disconnected {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let trop_tot = self
+            .last_chat_at
+            .map(|t| now.duration_since(t) < std::time::Duration::from_millis(2500))
+            .unwrap_or(false);
+        let repetition = self.last_chat_text.as_deref() == Some(msg)
+            && self
+                .last_chat_at
+                .map(|t| now.duration_since(t) < std::time::Duration::from_secs(20))
+                .unwrap_or(false);
+        if trop_tot || repetition {
+            println!("[local] {}", msg);
+            // Mémoriser quand même : le message "en attente" n'est pas perdu,
+            // il pourra repasser plus tard si la situation persiste.
+            return;
+        }
+        match self.say(msg).await {
+            Ok(()) => {
+                self.last_chat_at = Some(now);
+                self.last_chat_text = Some(msg.to_string());
+            }
+            Err(_) => println!("[local] {}", msg),
+        }
+    }
+
+    /// Compte-rendu d'une action : annonce le résultat réussi ou l'échec.
+    pub async fn announce_result(&mut self, ok: bool, reussi: &str, echec: &str) {
+        let msg = if ok { reussi } else { echec };
+        self.announce(msg).await;
     }
 }
 
