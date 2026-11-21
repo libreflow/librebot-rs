@@ -131,6 +131,8 @@ pub struct Bot {
     pub open_window_id: Option<u8>,
     /// Compteur de chunks dans le batch en cours.
     pub(crate) chunks_in_batch: i32,
+    /// Blocs hors de portée/inaccessibles récemment : on ne les re-cible pas.
+    pub failed_targets: Vec<(i32, i32, i32)>,
     /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
@@ -204,6 +206,7 @@ impl Bot {
                         recipes: Vec::new(),
                         open_window_id: None,
                         chunks_in_batch: 0,
+                        failed_targets: Vec::new(),
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,

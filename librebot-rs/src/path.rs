@@ -34,8 +34,8 @@ fn neighbors(world: &World, n: Node) -> Vec<(Node, f64)> {
         {
             out.push(((x, n.1 + 1, z), 1.6));
         }
-        // Chutes jusqu'à 3 blocs.
-        for dy in 1..=3 {
+        // Chutes jusqu'à 10 blocs (dégâts de chute modérés, jamais létaux).
+        for dy in 1..=10 {
             let y = n.1 - dy;
             if walkable(world, x, y, z)
                 && (y + 1..n.1).all(|yy| !world.is_solid(x, yy, z))
