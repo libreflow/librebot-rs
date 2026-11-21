@@ -131,6 +131,10 @@ pub struct Bot {
     pub open_window_id: Option<u8>,
     /// Compteur de chunks dans le batch en cours.
     pub(crate) chunks_in_batch: i32,
+    /// Envois différés : cancel-safe (aucun octet perdu si le future est annulé).
+    pub(crate) pending_send: bool,
+    pub(crate) pending_respawn: bool,
+    pub(crate) pending_dig_finish: Option<(i32, i32, i32, i32, &'static str)>,
 }
 
 impl Bot {
@@ -195,6 +199,9 @@ impl Bot {
                         recipes: Vec::new(),
                         open_window_id: None,
                         chunks_in_batch: 0,
+                        pending_send: false,
+                        pending_respawn: false,
+                        pending_dig_finish: None,
                     };
                     bot.configuration().await?;
                     return Ok(bot);
@@ -569,16 +576,16 @@ impl Bot {
     }
 
     pub async fn tick(&mut self, dt: f64) -> std::io::Result<()> {
+        self.physics_tick(dt);
+        self.flush_pending().await
+    }
+
+    /// Mise à jour physique sans émission réseau : cancel-safe, utilisable dans tokio::select!.
+    pub fn physics_tick(&mut self, dt: f64) {
         if self.dead {
-            // client_command : perform_respawn (0) — sans quoi l'entité disparaît du monde
-            self.dead = false;
-            self.path.clear();
-            self.mining = None;
-            let mut b = Vec::new();
-            crate::protocol::write_varint(0, &mut b);
-            self.conn.send(ids::play_s::CLIENT_COMMAND, &b).await?;
+            self.pending_respawn = true;
         }
-        let Some(p) = self.pos else { return Ok(()) };
+        let Some(p) = self.pos else { return };
         let mut pos = p;
         let mut moved = false;
 
@@ -649,26 +656,54 @@ impl Bot {
 
         self.pos = Some(pos);
         if moved {
-            self.send_position().await?;
+            self.pending_send = true;
         }
-        // client_tick_end (0x0d en 775) : envoyé à chaque tick pour débloquer l'envoi des chunks
-        // tick_end désactivé en 767
         if let Some((x, y, z, remaining, seq, name)) = self.mining {
             let remaining = remaining - dt;
             if remaining <= 0.0 {
                 self.mining = None;
-                let mut b = Vec::new();
-                crate::protocol::write_varint(2, &mut b);
-                crate::protocol::write_position(x, y, z, &mut b);
-                b.push(0u8);
-                crate::protocol::write_varint(seq, &mut b);
-                self.conn.send(ids::play_s::BLOCK_DIG, &b).await?;
-                println!("miné {} en ({}, {}, {})", name, x, y, z);
-                // Marquer le bloc comme air localement (le serveur confirmera par block_change)
-                self.world.set_block_state(x, y, z, 0);
+                self.pending_dig_finish = Some((x, y, z, seq, name));
             } else {
                 self.mining = Some((x, y, z, remaining, seq, name));
             }
+        }
+    }
+
+    /// Envoie les paquets différés par physics_tick — jamais annulé, jamais concurrent.
+    pub async fn flush_pending(&mut self) -> std::io::Result<()> {
+        if self.pending_respawn {
+            self.pending_respawn = false;
+            self.dead = false;
+            self.path.clear();
+            self.mining = None;
+            // client_command : perform_respawn (0) — sans quoi l'entité disparaît du monde
+            let mut b = Vec::new();
+            crate::protocol::write_varint(0, &mut b);
+            self.conn.send(ids::play_s::CLIENT_COMMAND, &b).await?;
+        }
+        if self.pending_send {
+            self.pending_send = false;
+            self.send_position().await?;
+        }
+        if let Some((x, y, z, seq, name)) = self.pending_dig_finish.take() {
+            let mut b = Vec::new();
+            crate::protocol::write_varint(2, &mut b);
+            crate::protocol::write_position(x, y, z, &mut b);
+            b.push(0u8);
+            crate::protocol::write_varint(seq, &mut b);
+            self.conn.send(ids::play_s::BLOCK_DIG, &b).await?;
+            println!("miné {} en ({}, {}, {})", name, x, y, z);
+            // Marquer le bloc comme air localement (le serveur confirmera par block_change)
+            self.world.set_block_state(x, y, z, 0);
+        }
+        Ok(())
+    }
+
+    /// Ferme la fenêtre de conteneur ouverte (table de craft ouverte par la mission).
+    pub async fn close_window(&mut self) -> std::io::Result<()> {
+        if let Some(id) = self.open_window_id.take() {
+            let b = vec![id];
+            self.conn.send(ids::play_s::CONTAINER_CLOSE, &b).await?;
         }
         Ok(())
     }

@@ -12,7 +12,7 @@ impl Bot {
     /// Retourne (x, y, z) du bloc le plus proche.
     pub fn find_block(&self, block_name: &str, radius: i32) -> Option<(i32, i32, i32)> {
         let p = self.pos?;
-        let (bx, by, bz) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        let (bx, by, bz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
         let target_state = crate::blocks_gen::block_state_by_name(block_name)?;
         let mut best: Option<(i32, i32, i32, i64)> = None;
         // Parcourir uniquement les chunks chargés autour du bot (16 blocs par chunk)
@@ -371,6 +371,7 @@ impl Bot {
         self.craft("wooden_pickaxe").await;
         self.craft("wooden_axe").await;
         self.craft("wooden_sword").await;
+        self.close_window().await.ok();
 
         self.dump_inventory();
         self.count_item("wooden_pickaxe") > 0
@@ -404,6 +405,7 @@ impl Bot {
         self.craft("stone_axe").await;
         self.craft("stone_sword").await;
         self.craft("furnace").await;
+        self.close_window().await.ok();
         self.dump_inventory();
         self.count_item("stone_pickaxe") > 0
     }
@@ -445,6 +447,7 @@ impl Bot {
         self.craft("iron_pickaxe").await;
         self.craft("iron_sword").await;
         self.craft("iron_axe").await;
+        self.close_window().await.ok();
         self.dump_inventory();
         self.count_item("iron_pickaxe") > 0
     }

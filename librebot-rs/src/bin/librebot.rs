@@ -61,9 +61,43 @@ async fn session(bot: Bot) {
     let mut bot = bot;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    enum Tour {
+        Evenement(std::io::Result<Event>),
+        Message(String),
+        Physique,
+    }
     loop {
-        tokio::select! {
-            ev = bot.play_turn() => match ev {
+        // 1) Envoyer les paquets différés : aucune écriture réseau n'est annulable.
+        if let Err(e) = bot.flush_pending().await {
+            eprintln!("erreur de protocole : {}", e);
+            break;
+        }
+        // 2) Sélection : seule la lecture est un future longévif ; les actions I/O
+        //    ont lieu après le select, sans jamais être annulées en cours d'envoi.
+        let tour = tokio::select! {
+            ev = bot.play_turn() => Tour::Evenement(ev),
+            Some(msg) = rx.recv() => Tour::Message(msg),
+            _ = tick.tick() => Tour::Physique,
+        };
+        match tour {
+            Tour::Physique => bot.physics_tick(0.05),
+            Tour::Message(msg) => {
+                if let Some(rest) = msg.strip_prefix("goto ") {
+                    let coords: Vec<i32> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+                    if coords.len() == 3 {
+                        match bot.goto(coords[0], coords[1], coords[2]).await {
+                            Some(n) => println!("chemin de {} étapes vers ({}, {}, {})", n, coords[0], coords[1], coords[2]),
+                            None => println!("aucun chemin trouvé vers ({}, {}, {})", coords[0], coords[1], coords[2]),
+                        }
+                    } else {
+                        println!("usage : goto <x> <y> <z>");
+                    }
+                } else if let Err(e) = bot.say(&msg).await {
+                    eprintln!("envoi impossible : {}", e);
+                    break;
+                }
+            }
+            Tour::Evenement(ev) => match ev {
                 Ok(Event::Connected) => {
                     println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id);
                     if let Some(p) = bot.pos {
@@ -92,28 +126,6 @@ async fn session(bot: Bot) {
                 Ok(Event::Disconnected(r)) => { println!("déconnecté : {}", r); break; }
                 Err(e) => { eprintln!("erreur de protocole : {}", e); break; }
             },
-            Some(msg) = rx.recv() => {
-                if let Some(rest) = msg.strip_prefix("goto ") {
-                    let coords: Vec<i32> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
-                    if coords.len() == 3 {
-                        match bot.goto(coords[0], coords[1], coords[2]).await {
-                            Some(n) => println!("chemin de {} étapes vers ({}, {}, {})", n, coords[0], coords[1], coords[2]),
-                            None => println!("aucun chemin trouvé vers ({}, {}, {})", coords[0], coords[1], coords[2]),
-                        }
-                    } else {
-                        println!("usage : goto <x> <y> <z>");
-                    }
-                } else if let Err(e) = bot.say(&msg).await {
-                    eprintln!("envoi impossible : {}", e);
-                    break;
-                }
-            }
-            _ = tick.tick() => {
-                if let Err(e) = bot.tick(0.05).await {
-                    eprintln!("erreur de physique : {}", e);
-                    break;
-                }
-            }
         }
     }
 }
