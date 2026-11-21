@@ -61,11 +61,10 @@ impl Config {
 fn json_field(raw: &str, key: &str) -> Option<String> {
     let pat = format!("\"{}\"", key);
     let i = raw.find(&pat)? + pat.len();
-    let rest = raw[i..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    if rest.starts_with('"') {
-        let end = rest[1..].find('"')? + 1;
-        Some(rest[1..end].to_string())
+    let rest = raw[i..].trim_start().strip_prefix(':')?.trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
     } else {
         let end = rest
             .find(|c: char| c == ',' || c == '}' || c.is_whitespace())

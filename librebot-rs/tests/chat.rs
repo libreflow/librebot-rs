@@ -11,7 +11,7 @@ use tokio::time::timeout;
 /// player_chat signé minimal de Steve : "coucou".
 fn player_chat_body(name: &str, message: &str) -> Vec<u8> {
     let mut b = Vec::new();
-    write_string("00000000-0000-0000-0000-000000000000", &mut b);
+    b.extend_from_slice(&[0u8; 16]); // UUID brut
     write_varint(0, &mut b);
     b.push(0); // pas de signature
     write_string(message, &mut b);
