@@ -137,12 +137,13 @@ pub fn floor_chunk_body(cx: i32, cz: i32, wall_x: Option<i32>) -> Vec<u8> {
                 blob.extend_from_slice(&v.to_be_bytes());
             }
         } else {
-            blob.push(0x00);
-            write_varint(0, &mut blob);
+            blob.push(0x00); // blocs : bits = 0 (valeur unique)
+            write_varint(0, &mut blob); // valeur = air
+            write_varint(0, &mut blob); // longueur du tableau = 0 (toujours envoyée)
         }
         blob.push(0x00); // biome : bits = 0 (valeur unique)
         write_varint(0, &mut blob); // id
-        blob.push(0x00); // hasData = false
+        write_varint(0, &mut blob); // longueur du tableau = 0 (toujours envoyée)
     }
     write_varint(blob.len() as i32, &mut body);
     body.extend_from_slice(&blob);

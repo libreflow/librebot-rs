@@ -90,7 +90,7 @@ impl World {
             let _block_count = data.u16();
             let blocs_bits = data.0.first().copied().unwrap_or(255);
             let section_index = si_dbg;
-            let res = read_paletted(&mut data, false);
+            let res = read_paletted(&mut data);
             let blocks = match res {
                 Ok(b) => b,
                 Err(e) => {
@@ -107,7 +107,7 @@ impl World {
                 }
             };
             let biomes_bits = data.0.first().copied().unwrap_or(255);
-            let _biomes = read_paletted(&mut data, true)?;
+            let _biomes = read_paletted(&mut data)?;
             if crate::bot::debug_enabled() {
                 let n_non_air = (0..SECTION_VOLUME)
                     .filter(|&i| blocks.get(i, SECTION_VOLUME) != 0)
@@ -211,49 +211,37 @@ impl World {
     }
 }
 
-/// Lit une valeur de palette ; les containers biome utilisent des
-/// RegistryEntryHolder : id varint + bool hasData + NBT optionnel.
-fn read_registry_value(b: &mut Body, registry: bool) -> i32 {
-    let id = b.varint();
-    if registry && b.bool() {
-        let _ = crate::nbt::parse(&mut b.0);
-    }
-    id
-}
-
-fn read_paletted(b: &mut Body, registry: bool) -> std::io::Result<Paletted> {
+/// Lit un conteneur paletted au format réel 1.21.1 (767), vérifié octet par
+/// octet sur les dumps d'un vrai serveur Paper :
+/// - bits = 0 : valeur unique (VarInt) PUIS longueur du tableau (VarInt, 0) —
+///   la longueur est envoyée même pour un conteneur à valeur unique ;
+/// - bits > 0 : palette (VarInt stock + VarInt valeurs simples — pas de
+///   « holder » : les id biome sont des varints nus), puis tableau de longs
+///   préfixé par sa longueur (VarInt), borner au contenu restant (anti-OOM).
+fn read_paletted(b: &mut Body) -> std::io::Result<Paletted> {
     let bits = b.u8() as u32;
     if bits == 0 {
+        let single = b.varint() as u32;
+        let _longueur = b.varint().max(0) as usize;
         return Ok(Paletted {
             palette: Vec::new(),
-            single: Some(read_registry_value(b, registry) as u32),
+            single: Some(single),
             data: Vec::new(),
             bits: 0,
         });
     }
     let mut palette = Vec::new();
     if bits <= 8 {
-        if registry && bits > 3 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("bits biome invalide: {}", bits),
-            ));
-        }
         let n = b.varint() as usize;
         for _ in 0..n {
-            palette.push(read_registry_value(b, registry) as u32);
+            palette.push(b.varint() as u32);
         }
-    }
-    if bits == 0 || bits > 16 {
+    } else if bits > 16 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("bits par entrée invalide: {}", bits),
         ));
     }
-    // Le tableau de longs est préfixé par sa longueur (VarInt) : la lire
-    // au lieu de la deviner, sinon tout le reste du chunk est désaligné.
-    // Borner au contenu réellement disponible : un chunk maltraité ne doit
-    // jamais pouvoir faire exploser la mémoire.
     let longs = (b.varint().max(0) as usize).min(b.rest().len().div_ceil(8));
     let mut data = Vec::with_capacity(longs);
     for _ in 0..longs {
@@ -307,10 +295,11 @@ mod tests {
             } else {
                 sections_blob.push(0x00); // blocs : bits = 0 (valeur unique)
                 sections_blob.push(0x00); // valeur = air
+                sections_blob.push(0x00); // longueur du tableau = 0 (toujours envoyée)
             }
             sections_blob.push(0x00); // biome : bits = 0 (valeur unique)
             sections_blob.push(0x00); // biome : id = 0
-            sections_blob.push(0x00); // biome : hasData = false
+            sections_blob.push(0x00); // longueur du tableau = 0
         }
         crate::protocol::write_varint(sections_blob.len() as i32, &mut body);
         body.extend_from_slice(&sections_blob);
