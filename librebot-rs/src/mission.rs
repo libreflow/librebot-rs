@@ -55,28 +55,37 @@ impl Bot {
 
     /// Va vers un bloc et le mine. Retourne true si miné.
     pub async fn goto_and_dig(&mut self, x: i32, y: i32, z: i32) -> bool {
-        // Se rapprocher si le bloc est loin
-        let dist = self.pos.map(|p| {
-            let dx = p[0] - (x as f64 + 0.5);
-            let dz = p[2] - (z as f64 + 0.5);
-            (dx * dx + dz * dz).sqrt()
-        }).unwrap_or(0.0);
-
         let dist_to = |p: [f64; 3]| {
             let dx = p[0] - (x as f64 + 0.5);
             let dz = p[2] - (z as f64 + 0.5);
             (dx * dx + dz * dz).sqrt()
         };
 
-        if dist > 3.0 {
-            // Aller à côté du bloc (au niveau du sol à côté)
-            let side = self.find_adjacent_free(x, y, z);
-            if let Some((sx, sy, sz)) = side {
-                self.goto(sx, sy, sz).await;
-                // Attendre d'arriver (simplifié : attendre que le path soit vide)
-                for _ in 0..200 {
-                    if self.path_len() == 0 { break; }
-                    self.drain_packets().await; self.tick(0.05).await.ok();
+        // Se rapprocher du bloc : jusqu'à 8 tentatives (A*, repli ligne droite),
+        // en attendant la fin de chaque chemin avant de recalculer.
+        for _attempt in 0..8 {
+            let Some(p) = self.pos else { return false };
+            if dist_to(p) <= 4.0 {
+                break;
+            }
+            let target = self.find_adjacent_free(x, y, z).unwrap_or((x, y, z));
+            let n = self.goto(target.0, target.1, target.2).await.unwrap_or(0);
+            if crate::bot::debug_enabled_pub() {
+                println!("goto {} waypoints vers ({}, {}, {})", n, target.0, target.1, target.2);
+            }
+            let start_pos = self.pos;
+            for _ in 0..400 {
+                if self.path_len() == 0 {
+                    break;
+                }
+                self.drain_packets().await;
+                self.tick(0.05).await.ok();
+            }
+            // Bloqué sans progresser : on sort, le minage dira "trop loin"
+            if let (Some(a), Some(b)) = (start_pos, self.pos) {
+                let moved = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                if self.path_len() > 0 && moved < 1.5 {
+                    break;
                 }
             }
         }
@@ -424,7 +433,10 @@ impl Bot {
             // Chercher de plus en plus loin
             let radius = 20 + tries * 10;
             if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80)) {
-                println!("tronc trouvé en ({}, {}, {}) dist~{}, minage...", x, y, z, radius);
+                let d = self.pos.map(|p| {
+                    ((p[0] - (x as f64 + 0.5)).powi(2) + (p[2] - (z as f64 + 0.5)).powi(2)).sqrt()
+                }).unwrap_or(0.0);
+                println!("tronc trouvé en ({}, {}, {}) à {:.1} blocs, approche...", x, y, z, d);
                 self.goto_and_dig(x, y, z).await;
                 // Miner aussi les blocs au-dessus (tronc vertical)
                 for dy in 1..4 {

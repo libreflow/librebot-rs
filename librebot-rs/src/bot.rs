@@ -432,6 +432,10 @@ impl Bot {
 
     /// declare_recipes (0x77) : compte, puis par recette { nom, type, données typées }.
     fn declare_recipes(&mut self, body: &[u8]) {
+        if debug_enabled() {
+            let head = &body[..body.len().min(64)];
+            eprintln!("[recipes] body len={} head={:02x?}", body.len(), head);
+        }
         let mut b = Body(body);
         let n = b.varint().max(0) as usize;
         for _ in 0..n {
@@ -518,11 +522,34 @@ impl Bot {
         let p = self.pos?;
         let start = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
         let goal = (x, y, z);
-        let path = find_path(&self.world, start, goal, crate::path::MAX_EXPANSIONS)?;
-        self.path = path
-            .into_iter()
-            .map(|(px, _py, pz)| (px as f64 + 0.5, pz as f64 + 0.5))
-            .collect();
+        let path = find_path(&self.world, start, goal, crate::path::MAX_EXPANSIONS);
+        self.path = match path {
+            Some(path) => path
+                .into_iter()
+                .map(|(px, _py, pz)| (px as f64 + 0.5, pz as f64 + 0.5))
+                .collect(),
+            None => {
+                // Repli : waypoints en ligne droite vers la cible (tous les 6 blocs).
+                // Le tick saute les obstacles d'un bloc ; un nouvel A* depuis une
+                // position plus proche pourra ensuite trouver un détour.
+                let (tx, tz) = (x as f64 + 0.5, z as f64 + 0.5);
+                let (mut cx, mut cz) = (p[0], p[2]);
+                let mut wp: VecDeque<(f64, f64)> = VecDeque::new();
+                loop {
+                    let dx = tx - cx;
+                    let dz = tz - cz;
+                    let d = (dx * dx + dz * dz).sqrt();
+                    if d <= 6.0 {
+                        wp.push_back((tx, tz));
+                        break;
+                    }
+                    cx += dx / d * 6.0;
+                    cz += dz / d * 6.0;
+                    wp.push_back((cx, cz));
+                }
+                wp
+            }
+        };
         Some(self.path.len())
     }
 
@@ -849,17 +876,26 @@ fn debug_enabled() -> bool {
     *DBG.get_or_init(|| std::env::var_os("LIBREBOT_DEBUG").is_some())
 }
 
+pub fn debug_enabled_pub() -> bool {
+    debug_enabled()
+}
+
 /// Saute les données d'une recette declare_recipes selon son type (protocole 767).
 /// Retourne false si le type (ou un ingrédient) est indécodable.
 fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
     match rtype {
         0 => {
-            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, notification
+            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, show_notification
             let _group = b.string();
             let _category = b.varint();
             let w = b.varint().max(0) as usize;
             let h = b.varint().max(0) as usize;
-            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b)) && skip_slot(b)
+            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b))
+                && skip_slot(b)
+                && {
+                    let _notify = b.bool();
+                    true
+                }
         }
         1 => {
             // crafting_shapeless : group, category, n ingrédients, résultat
@@ -868,12 +904,12 @@ fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
             let n = b.varint().max(0) as usize;
             (0..n).all(|_| skip_ingredient(b)) && skip_slot(b)
         }
-        2..=15 | 23 => {
-            // recettes spéciales (teinture, réparation...) : catégorie seule
+        2..=14 | 22 => {
+            // recettes spéciales (teinture, réparation, decorated_pot...) : catégorie seule
             let _category = b.varint();
             true
         }
-        16..=19 => {
+        15..=18 => {
             // smelting/blasting/smoking/campfire : group, cat, ingrédient, résultat, xp, temps
             let _group = b.string();
             let _category = b.varint();
@@ -883,17 +919,18 @@ fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
                 true
             }
         }
-        20 => {
+        19 => {
             // stonecutting : group, ingrédient, résultat
             let _group = b.string();
             skip_ingredient(b) && skip_slot(b)
         }
-        21 | 22 => {
-            // smithing_transform / smithing_trim : template, base, addition (+ résultat si transform)
-            skip_ingredient(b)
-                && skip_ingredient(b)
-                && skip_ingredient(b)
-                && (rtype != 21 || skip_slot(b))
+        20 => {
+            // smithing_transform : template, base, addition, résultat
+            skip_ingredient(b) && skip_ingredient(b) && skip_ingredient(b) && skip_slot(b)
+        }
+        21 => {
+            // smithing_trim : template, base, addition (pas de résultat)
+            skip_ingredient(b) && skip_ingredient(b) && skip_ingredient(b)
         }
         _ => false,
     }

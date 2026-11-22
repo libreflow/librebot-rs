@@ -326,3 +326,59 @@ fn slot_avec_composants_usuels_se_lit() {
     inv.apply_window_items(&w).expect("window_items doit passer malgré les composants");
     assert_eq!(inv.count(item_id("sponge")), 1);
 }
+
+#[tokio::test]
+async fn declare_recipes_shaped_avec_notification_se_parse() {
+    let (listener, addr) = free_listener().await;
+
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x27, &floor_chunk_body(0, 0, None)).await.unwrap();
+        conn.send(0x40, &position_body(0.5, (MIN_Y + 2) as f64, 0.5, 9))
+            .await
+            .unwrap();
+        expect(&mut conn, 0x00).await;
+        // declare_recipes (0x77) : 1 recette shaped (avec show_notification) + 1 shapeless
+        let mut b = Vec::new();
+        write_varint(2, &mut b);
+        // recette 1 : crafting_table, type 0 = shaped 2x2
+        write_string("minecraft:crafting_table", &mut b);
+        write_varint(0, &mut b); // type shaped
+        write_string("", &mut b); // group
+        write_varint(0, &mut b); // category
+        write_varint(2, &mut b); // width
+        write_varint(2, &mut b); // height
+        for _ in 0..4 {
+            write_varint(1, &mut b); // 1 slot autorisé par ingrédient
+            b.extend_from_slice(&slot_body(item_id("oak_planks"), 1));
+        }
+        b.extend_from_slice(&slot_body(item_id("crafting_table"), 1)); // résultat
+        b.push(1u8); // show_notification = true (champ 1.21 souvent oublié)
+        // recette 2 : oak_planks, type 1 = shapeless
+        write_string("minecraft:oak_planks", &mut b);
+        write_varint(1, &mut b);
+        write_string("", &mut b);
+        write_varint(0, &mut b);
+        write_varint(1, &mut b); // 1 ingrédient
+        write_varint(1, &mut b); // 1 slot autorisé
+        b.extend_from_slice(&slot_body(item_id("oak_log"), 1));
+        b.extend_from_slice(&slot_body(item_id("oak_planks"), 4)); // résultat
+        conn.send(0x77, &b).await.unwrap();
+        // garder la socket ouverte pendant que le bot lit
+        while let Ok(Ok(ReadOutcome::Packet(..))) =
+            timeout(Duration::from_secs(2), conn.read_packet()).await
+        {}
+    });
+
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    assert!(matches!(bot.play_turn().await.unwrap(), Event::Connected));
+    assert!(matches!(bot.play_turn().await.unwrap(), Event::Spawned));
+    bot.drain_packets().await;
+    assert_eq!(bot.recipes.len(), 2, "les 2 recettes doivent être déclarées: {:?}", bot.recipes);
+    assert!(bot.recipes.iter().any(|r| r == "minecraft:crafting_table"));
+    assert!(bot.recipes.iter().any(|r| r == "minecraft:oak_planks"));
+    server.await.unwrap();
+}
