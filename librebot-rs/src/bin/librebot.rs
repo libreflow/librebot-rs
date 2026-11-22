@@ -28,7 +28,7 @@ async fn main() {
         PROTOCOL_VERSION, cfg.host, cfg.port, cfg.username
     );
     loop {
-        match Bot::connect(&cfg.host, cfg.port, &cfg.username).await {
+        match Bot::connect_with_view(&cfg.host, cfg.port, &cfg.username, cfg.view_distance as i8).await {
             Ok(bot) => session(bot).await,
             Err(e) => eprintln!("connexion impossible : {}", e),
         }

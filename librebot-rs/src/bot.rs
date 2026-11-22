@@ -317,7 +317,7 @@ impl Bot {
                     settings.push(0);                        // enableServerListing
                     // En 767: pas de particleStatus
                     if debug_enabled() {
-                        eprintln!("[envoi config settings] {:02x?}", &settings);
+                        eprintln!("[envoi config settings] {:02x?}", settings);
                     }
                     self.conn.send(ids::config_s::SETTINGS, &settings).await?;
                 }
@@ -375,7 +375,7 @@ impl Bot {
                     settings.push(0); // enableTextFiltering
                     settings.push(0); // enableServerListing
                     if debug_enabled() {
-                        eprintln!("[envoi play settings] {:02x?}", &settings);
+                        eprintln!("[envoi play settings] {:02x?}", settings);
                     }
                     self.conn.send(ids::play_s::SETTINGS, &settings).await?;
                     return Ok(Event::Connected);
@@ -950,18 +950,10 @@ impl Bot {
     }
 
     /// Exécute une commande vanilla/serveur en tant que joueur op.
-    /// Corps 767 réel : string + timestamp i64 + salt i64 + signatures
-    /// (compte varint 0) + accusé de lecture (3 octets).
+    /// Corps 767 officiel (minecraft-data 1.21.1) : la commande seule.
     pub async fn run_command(&mut self, commande: &str) -> std::io::Result<()> {
         let mut b = Vec::new();
         write_string(commande, &mut b);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        b.extend_from_slice(&(now.as_millis() as i64).to_be_bytes());
-        b.extend_from_slice(&0i64.to_be_bytes());
-        crate::protocol::write_varint(0, &mut b); // aucune signature d'argument
-        b.extend_from_slice(&[0u8; 3]); // acknowledged
         self.conn.send(ids::play_s::CHAT_COMMAND, &b).await
     }
 

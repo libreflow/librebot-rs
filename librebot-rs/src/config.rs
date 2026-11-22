@@ -8,6 +8,7 @@ pub struct Config {
     pub port: u16,
     pub username: String,
     pub reconnect_secs: u64,
+    pub view_distance: u8,
 }
 
 impl Default for Config {
@@ -17,6 +18,7 @@ impl Default for Config {
             port: 25565,
             username: "LibreBot".into(),
             reconnect_secs: 30,
+            view_distance: 8,
         }
     }
 }
@@ -41,6 +43,11 @@ impl Config {
             if let Some(v) = json_field(&raw, "reconnectSecs") {
                 if let Ok(p) = v.parse() {
                     c.reconnect_secs = p;
+                }
+            }
+            if let Some(v) = json_field(&raw, "viewDistance") {
+                if let Ok(p) = v.parse() {
+                    c.view_distance = p;
                 }
             }
         }
