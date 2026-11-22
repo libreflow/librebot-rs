@@ -584,6 +584,19 @@ impl Bot {
                 println!("{}", self.rapport_diag());
                 dernier_diag = std::time::Instant::now();
             }
+            // 0a) Pause commande par le chat : ne rien faire d'autre que vivre.
+            if self.en_pause {
+                self.drain_packets().await;
+                self.tick(0.05).await.ok();
+                continue;
+            }
+            // 0b) CERVEAU à priorités pondérées (zéro LLM, déterministe) :
+            // mourir 1000 > lave 900 > noyade 850 > faim 700 > combat 600.
+            let decision = self.reflechir();
+            if decision.urgence != crate::cerveau::Urgence::Aucune {
+                crate::cerveau::executer(self, &decision).await;
+                continue;
+            }
             // 0b) Balise de position régulière : qui cherche le bot dans le jeu
             //    peut lire ses coordonnées dans le chat et s'y téléporter.
             if derniere_balise.elapsed() >= std::time::Duration::from_secs(90) {
@@ -700,5 +713,69 @@ impl Bot {
             }
         }
         println!("mission interrompue (déconnexion)");
+    }
+}
+
+impl Bot {
+    /// Mode panique : fuir à l'opposé de la menace la plus proche (cerveau).
+    pub async fn fuite_panique(&mut self) -> bool {
+        let Some(p) = self.pos else { return false };
+        let oppos = self
+            .entities
+            .plus_proche(p[0], p[1], p[2], entities::HOSTILES, 24.0)
+            .map(|(_, e)| (e.x, e.z))
+            .unwrap_or((p[0] - 1.0, p[2]));
+        let dx = p[0] - oppos.0;
+        let dz = p[2] - oppos.1;
+        let d = dx.hypot(dz).max(1.0);
+        let tx = (p[0] + dx / d * 18.0).floor() as i32;
+        let tz = (p[2] + dz / d * 18.0).floor() as i32;
+        if let Some((gx, gy, gz)) = self.find_walkable_near(tx, p[1].floor() as i32, tz) {
+            self.goto(gx, gy, gz).await;
+            for _ in 0..120 {
+                if self.path_len() == 0 || self.disconnected {
+                    break;
+                }
+                self.drain_packets().await;
+                self.tick(0.05).await.ok();
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Traitement des commandes chat reçues (joueur → bot).
+    /// Format accepté : « LibreBot stop », « !stop », ou whisper/tell.
+    pub async fn traiter_commande_chat(&mut self, texte: &str) -> bool {
+        let bas = texte.to_lowercase();
+        let corps = bas
+            .trim_start()
+            .trim_start_matches(&format!("{}:", self.username.to_lowercase()))
+            .trim_start_matches(&self.username.to_lowercase())
+            .trim_start();
+        let corps = corps.strip_prefix('!').unwrap_or(corps).trim();
+        match corps.split_whitespace().next().unwrap_or("") {
+            "stop" | "pause" => {
+                println!("commande chat : mission en pause");
+                self.en_pause = true;
+                true
+            }
+            "reprendre" | "reprend" => {
+                println!("commande chat : mission reprise");
+                self.en_pause = false;
+                true
+            }
+            "statut" => {
+                if let Some(p) = self.pos {
+                    self.announce(&format!(
+                        "statut : pv {:.0}, faim {}, phase outils ok, x={} y={} z={}",
+                        self.health, self.food, p[0] as i32, p[1] as i32, p[2] as i32
+                    ))
+                    .await;
+                }
+                true
+            }
+            _ => false,
+        }
     }
 }

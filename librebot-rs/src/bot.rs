@@ -156,6 +156,8 @@ pub struct Bot {
     pub entities: Entities,
     /// Heure du monde (ticks de journée, 0-24000) — pour savoir quand dormir.
     pub day_time: i64,
+    /// Commande chat « stop/pause » reçue : la mission boucle à vide.
+    pub en_pause: bool,
     /// Campement du bot, s'il en a établi un.
     pub camp: Option<crate::camp::Camp>,
     /// Anti-spam chat : dernier instant d'envoi + dernier texte dit.
@@ -259,6 +261,7 @@ impl Bot {
                         food: 20,
                         entities: Entities::new(),
                         day_time: 0,
+                        en_pause: false,
                         camp: None,
                         last_chat_at: None,
                         last_chat_text: None,
@@ -901,6 +904,9 @@ impl Bot {
             // client_command : perform_respawn (0) — sans quoi l'entité disparaît du monde
             let mut b = Vec::new();
             crate::protocol::write_varint(0, &mut b);
+            if debug_enabled() {
+                eprintln!("[envoi respawn] client_command(0)");
+            }
             self.conn.send(ids::play_s::CLIENT_COMMAND, &b).await?;
         }
         if self.pending_send {

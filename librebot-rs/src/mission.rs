@@ -42,7 +42,11 @@ impl Bot {
     pub fn find_block(&self, block_name: &str, radius: i32) -> Option<(i32, i32, i32)> {
         let p = self.pos?;
         let (bx, by, bz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
-        let target_state = crate::blocks_gen::block_state_by_name(block_name)?;
+        // Comparer par NOM et non par état exact : un bloc possédant des
+        // propriétés (ex. l'axe d'un tronc x/y/z) couvre des dizaines d'états
+        // — l'état « premier de la plage » ne correspond qu'à une variante.
+        // C'est ainsi qu'un chêne entier échappait à la recherche alors que
+        // ses troncs debout étaient bien décodés dans le monde.
         let mut best: Option<(i32, i32, i32, i64)> = None;
         // Parcourir uniquement les chunks chargés autour du bot (16 blocs par chunk)
         let r = radius.max(16);
@@ -59,7 +63,12 @@ impl Bot {
                     if y < by - 24 {
                         continue;
                     }
-                    if self.world.block_state(x, y, z) == Some(target_state)
+                    let nom_ok = self
+                        .world
+                        .block_state(x, y, z)
+                        .map(|s| crate::blocks_gen::block_name(s) == block_name)
+                        .unwrap_or(false);
+                    if nom_ok
                         && !self.failed_targets.contains(&(x, y, z))
                     {
                         let dist = (dx * dx + dy * dy + dz * dz) as i64;
@@ -91,6 +100,13 @@ impl Bot {
 
     /// Va vers un bloc et le mine. Retourne true si miné.
     pub async fn goto_and_dig(&mut self, x: i32, y: i32, z: i32) -> bool {
+        self.goto_and_dig_opt(x, y, z, true).await
+    }
+
+    /// Comme goto_and_dig ; `memoire_cible` = false pour ne pas blacklister la
+    /// cible en cas d'échec d'approche (troncs : ils ne disparaissent pas,
+    /// la liste noire s'empoisonnait après 3 collines infranchissables).
+    pub async fn goto_and_dig_opt(&mut self, x: i32, y: i32, z: i32, memoire_cible: bool) -> bool {
         if self.disconnected {
             return false;
         }
@@ -120,7 +136,9 @@ impl Bot {
                         "bloqué en approche de ({}, {}, {}) : abandon de cette cible",
                         x, y, z
                     );
-                    self.remember_failed(x, y, z);
+                    if memoire_cible {
+                        self.remember_failed(x, y, z);
+                    }
                     return false;
                 }
             } else {
@@ -158,12 +176,24 @@ impl Bot {
                     x, y, z, d3, -(p[1] - y as f64)
                 );
             }
-            // Point intermédiaire en direction du bloc
+            // Point intermédiaire en direction du bloc — avec essais en
+            // zigzag : un flanc de colline sur la ligne droite ne doit pas
+            // faire abandonner une cible pourtant atteignable de biais.
             let pas = horiz.min(12.0);
-            let tx = (p[0] - dx / horiz * pas).floor() as i32;
-            let tz = (p[2] - dz / horiz * pas).floor() as i32;
-            let Some((gx, gy, gz)) = self.find_walkable_near(tx, p[1].floor() as i32 + 1, tz) else {
-                let ty = p[1].floor() as i32 + 1;
+            let dirx = dx / horiz;
+            let dirz = dz / horiz;
+            let tx = (p[0] - dirx * pas).floor() as i32;
+            let tz = (p[2] - dirz * pas).floor() as i32;
+            let ty = p[1].floor() as i32 + 1;
+            let cible_cellule = self.find_walkable_near(tx, ty, tz).or_else(|| {
+                // décalages perpendiculaires puis en arrière
+                let perpx = (-dirz * 4.0).round() as i32;
+                let perpz = (dirx * 4.0).round() as i32;
+                self.find_walkable_near(tx + perpx, ty, tz + perpz)
+                    .or_else(|| self.find_walkable_near(tx - perpx, ty, tz - perpz))
+                    .or_else(|| self.find_walkable_near(tx + dirx as i32 * 6, ty, tz + dirz as i32 * 6))
+            });
+            let Some((gx, gy, gz)) = cible_cellule else {
                 eprintln!(
                     "aucune cellule praticable vers ({},{},{}), sol={:?}, dessus={:?}, encore={:?}",
                     tx, ty, tz,
@@ -195,7 +225,9 @@ impl Bot {
                 let dz = p[2] - (z as f64 + 0.5);
                 if (dx * dx + dy * dy + dz * dz).sqrt() > 4.5 {
                     // Hors de portée : le serveur rejetterait le minage en silence.
-                    self.remember_failed(x, y, z);
+                    if memoire_cible {
+                        self.remember_failed(x, y, z);
+                    }
                     return false;
                 }
             }
@@ -489,13 +521,13 @@ impl Bot {
         // Récolter 6 bûches
         let mut got = self.count_item_any(&logs);
         let mut tries = 0;
-        while got < 6 && tries < 30 {
+        while got < 6 && tries < 40 {
             tries += 1;
             // Chercher de plus en plus loin
             let radius = 20 + tries * 10;
-            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80)) {
+            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(90)) {
                 println!("tronc trouvé en ({}, {}, {}) dist~{}, minage...", x, y, z, radius);
-                self.goto_and_dig(x, y, z).await;
+                self.goto_and_dig_opt(x, y, z, false).await;
                 // Miner aussi les blocs au-dessus (tronc vertical)
                 for dy in 1..4 {
                     if self.world.block_state(x, y + dy, z).is_some() {
@@ -507,11 +539,27 @@ impl Bot {
                 }
             } else {
                 println!("pas de tronc trouvé (rayon {}), on avance au hasard...", radius);
+                if tries == 3 {
+                    self.dump_noms_de_blocs_autour(60);
+                }
                 // Avancer dans une direction aléatoire pour découvrir de nouveaux chunks
                 if let Some(p) = self.pos {
-                    let angle = (tries as f64) * 2.4;
-                    let tx = (p[0] + angle.cos() * 30.0).floor() as i32;
-                    let tz = (p[2] + angle.sin() * 30.0).floor() as i32;
+                    // Angle d'errance décalé par bot (hash du pseudo) : une
+                    // flotte de bots explore des directions différentes au lieu
+                    // de tous marcher sur le même arbre.
+                    let decalage = self
+                        .username
+                        .bytes()
+                        .map(|b| b as f64)
+                        .sum::<f64>()
+                        .to_radians();
+                    let angle = (tries as f64) * 2.4 + decalage;
+                    // Zones vides (plaines sans arbre) : explorer LARGE —
+                    // les petits pas de 30 blocs laissaient le bot tourner
+                    // en rond dans une plaine sans jamais voir de forêt.
+                    let portee = 45.0 + (tries as f64) * 5.0;
+                    let tx = (p[0] + angle.cos() * portee).floor() as i32;
+                    let tz = (p[2] + angle.sin() * portee).floor() as i32;
                     let ty = p[1].floor() as i32;
                     // Viser une cellule réellement praticable, sinon le chemin échoue
                     // silencieusement et le bot reste sur place.
@@ -581,6 +629,43 @@ impl Bot {
     /// Compte les items dont le nom est dans la liste.
     pub fn count_item_any(&self, names: &[&str]) -> i32 {
         names.iter().map(|n| self.count_item(n)).sum()
+    }
+
+    /// Diagnostic : les noms de blocs les plus fréquents autour du bot.
+    pub fn dump_noms_de_blocs_autour(&self, rayon: i32) {
+        use std::collections::HashMap;
+        let Some(p) = self.pos else { return };
+        let (bx, by, bz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+        let mut compte: HashMap<&'static str, u32> = HashMap::new();
+        for dx in -rayon..=rayon {
+            for dy in -16..=16 {
+                for dz in -rayon..=rayon {
+                    let (x, y, z) = (bx + dx, by + dy, bz + dz);
+                    if !self.world.has_chunk(x.div_euclid(16), z.div_euclid(16)) {
+                        continue;
+                    }
+                    if let Some(state) = self.world.block_state(x, y, z) {
+                        if state != 0 {
+                            *compte.entry(crate::blocks_gen::block_name(state)).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut top: Vec<(&&'static str, &u32)> = compte.iter().collect();
+        top.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+        let resume: Vec<String> = top
+            .iter()
+            .take(18)
+            .map(|(n, c)| format!("{}x{}", n, c))
+            .collect();
+        println!("[blocs autour] {}", resume.join(", "));
+        let troncs: Vec<String> = top
+            .iter()
+            .filter(|(n, _)| n.ends_with("_log"))
+            .map(|(n, c)| format!("{}x{}", n, c))
+            .collect();
+        println!("[troncs visibles] {:?}", troncs);
     }
 
     /// Phase 2 : miner de la pierre avec la pioche, crafter outils en pierre + fourneau.

@@ -3,13 +3,15 @@ name = "librebot-rs"
 version = "0.1.0"
 edition = "2021"
 default-run = "librebot"
-description = "Bot Minecraft Java Edition autonome en Rust (client protocole natif, zérot dépendance à Node)"
+description = "Bot Minecraft Java Edition autonome en Rust (client protocole natif, zéro dépendance à Node)"
 license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 flate2 = "1"
 md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 lto = true
@@ -18,3 +20,7 @@ strip = true
 [[bin]]
 name = "librebot-cmd"
 path = "src/bin/librebot_cmd.rs"
+
+[[bin]]
+name = "watchdog"
+path = "src/bin/watchdog.rs"

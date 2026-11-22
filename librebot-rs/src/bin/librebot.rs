@@ -23,25 +23,86 @@ async fn main() {
     let cfg_path = PathBuf::from("config.json");
     let cfg = Config::load(&cfg_path, host.as_deref(), port, username.as_deref());
 
+    // Verrou anti-double-instance : un seul bot par répertoire.
+    if let Err(e) = librebot_rs::verrou::prendre_verrou() {
+        eprintln!("refus de démarrer : {}", e);
+        return;
+    }
+
+    // Détection de version (config version: "auto") : ping de statut et
+    // message explicite si le protocole n'est pas le 767 implémenté.
+    if cfg.version.as_deref().map(|v| v == "auto").unwrap_or(true) {
+        match librebot_rs::version::ping_version(&cfg.host, cfg.port).await {
+            Ok(info) => {
+                println!("cible : {} (protocole {}, {} joueur(s))",
+                    info.version, info.protocole, info.joueurs);
+                if info.protocole != librebot_rs::version::PROTOCOLE_SUPPORTÉ {
+                    eprintln!("{}", librebot_rs::version::message_non_supporte(&info));
+                    librebot_rs::verrou::liberer_verrou();
+                    return;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "ping de statut impossible ({}) — le serveur dort probablement ; reconnexion en boucle.",
+                    e
+                );
+            }
+        }
+    }
+
     println!(
         "librebot-rs (protocole {}) — cible {}:{} en tant que {}",
         PROTOCOL_VERSION, cfg.host, cfg.port, cfg.username
     );
+    // Dispersion au démarrage : les instances d'une flotte ne doivent pas
+    // ouvrir leur connexion à la même seconde (Paper throttle ~1/IP/4 s).
+    if cfg.start_jitter_secs > 0 {
+        let nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        let attente_ms = nano % (cfg.start_jitter_secs * 1000 + 1);
+        println!("démarrage décalé de {} ms (dispersion de flotte)", attente_ms);
+        tokio::time::sleep(std::time::Duration::from_millis(attente_ms)).await;
+    }
     // Backoff exponentiel : Aternos throttle les reconnexions rapides en
     // fermant les connexions suivantes — doubler le délai à chaque échec
     // consécutif (jusqu'à 5 min) rend le bot fiable sur les hébergements free.
+    // Exception : un « Connection throttled » explicite n'est pas un échec
+    // du bot — attendre quelques secondes suffit, pas un doublement.
     let mut attente = cfg.reconnect_secs;
+    let mut throttle_repete = 0u32;
     loop {
         let debut = std::time::Instant::now();
+        let mut est_throttle = false;
         match Bot::connect_with_view(&cfg.host, cfg.port, &cfg.username, cfg.view_distance as i8).await {
-            Ok(bot) => session(bot).await,
-            Err(e) => eprintln!("connexion impossible : {}", e),
+            Ok(bot) => {
+                // Panics confinées par session : une erreur ne tue jamais le process.
+                let tache = tokio::spawn(session(bot));
+                if let Err(e) = tache.await {
+                    if e.is_panic() {
+                        eprintln!("panic confinée par tâche : {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                est_throttle = e.to_string().to_lowercase().contains("throttled");
+                eprintln!("connexion impossible : {}", e);
+            }
         }
         let duree_session = debut.elapsed();
         if duree_session >= std::time::Duration::from_secs(120) {
             attente = cfg.reconnect_secs; // session saine : raz du backoff
+            throttle_repete = 0;
         } else {
-            attente = (attente.saturating_mul(2)).min(300);
+            // Throttle explicite du serveur : patience courte et fixe.
+            if est_throttle {
+                throttle_repete += 1;
+                attente = 15 + (throttle_repete.min(4) * 5) as u64;
+            } else {
+                attente = (attente.saturating_mul(2)).min(300u64);
+            }
         }
         println!(
             "reconnexion dans {} s (session écoulée {:.0} s — Ctrl-C pour arrêter)",
@@ -138,7 +199,11 @@ async fn session(bot: Bot) {
                         }
                     }
                 }
-                Ok(Event::Chat(t)) => println!("{}", t),
+                Ok(Event::Chat(t)) => {
+                    println!("{}", t);
+                    // Commandes chat joueur → bot (« LibreBot stop", "!statut"…)
+                    bot.traiter_commande_chat(&t).await;
+                }
                 Ok(Event::Disconnected(r)) => { println!("déconnecté : {}", r); break; }
                 Err(e) => { eprintln!("erreur de protocole : {}", e); break; }
             },
