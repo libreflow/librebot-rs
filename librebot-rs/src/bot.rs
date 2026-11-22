@@ -296,7 +296,7 @@ impl Bot {
             let debug = debug_enabled();
             if debug {
                 if let Packet(id, body) = &pkt {
-                    eprintln!("[pkt] 0x{:02x} ({} o) {:02x?}", id, body.len(), &body[..body.len().min(48)]);
+                    eprintln!("[pkt] 0x{:02x} ({} o) {:02x?}", id, body.len(), &body[..body.len().min(256)]);
                     if *id == ids::play_c::DECLARE_RECIPES
                         && std::env::var("LIBREBOT_DUMP_RECIPES").is_ok()
                     {

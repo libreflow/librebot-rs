@@ -49,6 +49,7 @@ async fn session(bot: Bot) {
         for line in reader.lines() {
             match line {
                 Ok(l) if !l.trim().is_empty() => {
+                    eprintln!("[stdin] commande recue: {:?}", l.trim());
                     if tx.blocking_send(l.trim().to_string()).is_err() {
                         break;
                     }
@@ -66,6 +67,13 @@ async fn session(bot: Bot) {
             ev = bot.play_turn() => match ev {
                 Ok(Event::Connected) => {
                     println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id);
+                    if std::env::var("LIBREBOT_DEBUG").is_ok() {
+                        bot.dump_inventory();
+                    }
+                    if std::env::var("LIBREBOT_SKIP_MISSION").is_ok() {
+                        println!("--- Mission auto designee (LIBREBOT_SKIP_MISSION), commandes stdin ---");
+                        continue;
+                    }
                     // Lancer la mission survie automatiquement
                     println!("--- Démarrage de la mission survie ---");
                     let r1 = bot.phase_wood().await;
