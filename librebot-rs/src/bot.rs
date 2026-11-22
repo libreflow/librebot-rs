@@ -147,6 +147,8 @@ pub struct Bot {
     pub health: f32,
     /// true tant que l'écran de mort est affiché (respawn pas encore reçu).
     pub dead: bool,
+    /// Dernier bloc d'atterrissage logué (évite le spam quand le bot saute sur place).
+    last_landing: Option<(i32, i32, i32)>,
 }
 
 impl Bot {
@@ -215,6 +217,7 @@ impl Bot {
                         air_confirmed: std::collections::HashSet::new(),
                         health: 20.0,
                         dead: false,
+                        last_landing: None,
                     };
                     bot.configuration().await?;
                     return Ok(bot);
@@ -713,6 +716,7 @@ impl Bot {
         // Lire jusqu'à 300 paquets ou timeout de 50ms sans données
         for _ in 0..300 {
             match tokio::time::timeout(std::time::Duration::from_millis(50), self.play_turn()).await {
+                Ok(Ok(Event::Disconnected(_))) => break,
                 Ok(Ok(_)) => continue,
                 Ok(Err(_)) => break,
                 Err(_) => break, // timeout = plus rien en attente
@@ -741,12 +745,17 @@ impl Bot {
                 let cz = nz.floor() as i32;
                 let fy = (pos[1] + 0.01).floor() as i32;
                 let blocked = self.world.is_solid(cx, fy, cz) || self.world.is_solid(cx, fy + 1, cz);
-                if !blocked {
+                // Trou de plus de 3 blocs sous la destination (chunk chargé) : rester au bord
+                // plutôt que de tomber (le repli "ligne droite" de goto ne voit pas les trous).
+                let hole = self.on_ground
+                    && self.world.has_chunk(cx.div_euclid(16), cz.div_euclid(16))
+                    && (1..=4).all(|d| !self.world.is_solid(cx, fy - d, cz));
+                if !blocked && !hole {
                     pos[0] = nx;
                     pos[2] = nz;
                     self.yaw = (dz).atan2(dx) as f32;
                     moved = true;
-                } else if self.on_ground {
+                } else if blocked && self.on_ground {
                     self.vy = JUMP_VELOCITY;
                     self.on_ground = false;
                 }
@@ -778,13 +787,17 @@ impl Bot {
                             final_y = top;
                             if !self.on_ground {
                                 self.on_ground = true;
-                                println!(
-                                    "atterri sur {} en ({:.2}, {}, {:.2})",
-                                    self.world.block_name(fx, by, fz).unwrap_or("?"),
-                                    pos[0],
-                                    top,
-                                    pos[2]
-                                );
+                                let land = (fx, by, fz);
+                                if self.last_landing != Some(land) {
+                                    self.last_landing = Some(land);
+                                    println!(
+                                        "atterri sur {} en ({:.2}, {}, {:.2})",
+                                        self.world.block_name(fx, by, fz).unwrap_or("?"),
+                                        pos[0],
+                                        top,
+                                        pos[2]
+                                    );
+                                }
                             }
                             self.vy = 0.0;
                             break;

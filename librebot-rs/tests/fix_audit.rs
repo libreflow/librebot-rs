@@ -382,3 +382,60 @@ async fn declare_recipes_shaped_avec_notification_se_parse() {
     assert!(bot.recipes.iter().any(|r| r == "minecraft:oak_planks"));
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn marche_directe_ne_tombe_pas_dans_un_trou() {
+    let (listener, addr) = free_listener().await;
+
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x27, &floor_chunk_body(0, 0, None)).await.unwrap();
+        conn.send(0x40, &position_body(0.5, (MIN_Y + 2) as f64, 0.5, 9))
+            .await
+            .unwrap();
+        expect(&mut conn, 0x00).await;
+        // Tranchée pleine largeur du chunk en x=3..=8 au niveau du sol : aucun chemin A*
+        for x in 3..=8 {
+            for z in 0..16 {
+                conn.send(0x09, &block_change_body(x, MIN_Y, z, 0))
+                    .await
+                    .unwrap();
+            }
+        }
+        // garder la socket ouverte pendant que le bot avance
+        while let Ok(Ok(ReadOutcome::Packet(..))) =
+            timeout(Duration::from_secs(2), conn.read_packet()).await
+        {}
+    });
+
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    assert!(matches!(bot.play_turn().await.unwrap(), Event::Connected));
+    assert!(matches!(bot.play_turn().await.unwrap(), Event::Spawned));
+    bot.drain_packets().await;
+    // attendre l'atterrissage sur le sol
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !bot.on_ground && Instant::now() < deadline {
+        bot.drain_packets().await;
+        bot.tick(0.05).await.unwrap();
+    }
+    assert!(bot.on_ground);
+
+    // Aller de l'autre côté de la tranchée : A* échoue (trou de 6 blocs),
+    // goto passe en repli "ligne droite" — le bot ne doit pas tomber dedans.
+    assert!(bot.goto(12, MIN_Y + 1, 0).await.is_some());
+    for _ in 0..300 {
+        bot.drain_packets().await;
+        bot.tick(0.05).await.unwrap();
+    }
+    let p = bot.pos.unwrap();
+    assert!(
+        p[1] > (MIN_Y as f64) + 0.5,
+        "le bot est tombé dans le trou: y={}",
+        p[1]
+    );
+    assert!(p[0] < 3.5, "le bot a traversé le trou: x={}", p[0]);
+    server.await.unwrap();
+}

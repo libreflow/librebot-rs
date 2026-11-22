@@ -19,6 +19,9 @@ impl Bot {
         let r = radius.max(16);
         for dx in -r..=r {
             for dy in -r..=r {
+                // Cible à hauteur du bot (±16) : éviter les blocs en fond de cave,
+                // inatteignables à pied et qui font échouer le pathfinding.
+                if dy.abs() > 16 { continue; }
                 for dz in -r..=r {
                     let (x, y, z) = (bx + dx, by + dy, bz + dz);
                     // Ne chercher que dans les chunks chargés
