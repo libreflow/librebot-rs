@@ -57,6 +57,8 @@ pub(crate) mod ids {
         pub const EXPERIENCE: i32 = 0x5c;
         pub const GAME_EVENT: i32 = 0x22;
         pub const RESPAWN: i32 = 0x47;
+        pub const PLAYER_COMBAT_KILL: i32 = 0x3c;
+        pub const PLAYER_COMBAT_END: i32 = 0x3a;
         pub const DECLARE_RECIPES: i32 = 0x77;
         pub const OPEN_WINDOW: i32 = 0x33;
         pub const CLOSE_WINDOW: i32 = 0x12;
@@ -78,6 +80,7 @@ pub(crate) mod ids {
     pub mod play_s {
         // IDs serverbound 767 — source : minecraft-data
         pub const TELEPORT_CONFIRM: i32 = 0x00;
+        pub const CLIENT_COMMAND: i32 = 0x09;
         pub const USE_ENTITY: i32 = 0x16;
         pub const CHAT_MESSAGE: i32 = 0x06;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
@@ -108,6 +111,7 @@ pub enum Event {
     Spawned,
     Disconnected(String),
     Chat(String),
+    Died,
 }
 
 pub struct Bot {
@@ -137,6 +141,10 @@ pub struct Bot {
     pub(crate) chunks_in_batch: i32,
     /// Blocs passés à l'air par le serveur (block_change confirmé) — preuve de casse.
     pub air_confirmed: std::collections::HashSet<(i32, i32, i32)>,
+    /// Vie courante (set_health 0x5d) ; 0 = mort.
+    pub health: f32,
+    /// true tant que l'écran de mort est affiché (respawn pas encore reçu).
+    pub dead: bool,
 }
 
 impl Bot {
@@ -202,6 +210,8 @@ impl Bot {
                         open_window_id: None,
                         chunks_in_batch: 0,
                         air_confirmed: std::collections::HashSet::new(),
+                        health: 20.0,
+                        dead: false,
                     };
                     bot.configuration().await?;
                     return Ok(bot);
@@ -364,6 +374,28 @@ impl Bot {
                 Packet(ids::play_c::KICK_DISCONNECT, body) => {
                     let reason = chat_reason(&body);
                     return Ok(Event::Disconnected(reason));
+                }
+                // set_health (0x5d) : float vie, varint faim, float saturation
+                Packet(ids::play_c::SET_HEALTH, body) => {
+                    let mut b = Body(&body);
+                    let health = b.f32();
+                    let _food = b.varint();
+                    let _saturation = b.f32();
+                    self.health = health;
+                    if health <= 0.0 {
+                        self.send_respawn().await?;
+                        return Ok(Event::Died);
+                    }
+                }
+                // player_combat_kill (0x3c) : écran de mort
+                Packet(ids::play_c::PLAYER_COMBAT_KILL, _) => {
+                    self.send_respawn().await?;
+                    return Ok(Event::Died);
+                }
+                // respawn (0x47) : le serveur renvoie le joueur (nouvelle dimension/spawn)
+                Packet(ids::play_c::RESPAWN, _) => {
+                    self.dead = false;
+                    self.health = 20.0;
                 }
                 // declare_recipes (0x77 en 767) : { count, [ name, type, data... ] }
                 Packet(ids::play_c::DECLARE_RECIPES, body) => {
@@ -745,6 +777,19 @@ impl Bot {
         b.extend_from_slice(&self.pitch.to_be_bytes());
         b.push(self.on_ground as u8);
         self.conn.send(ids::play_s::POSITION_LOOK, &b).await
+    }
+
+    /// Envoie `client_command` (0x09) action 0 = PERFORM_RESPAWN : demande le respawn
+    /// apres la mort. Idempotent tant que le serveur n'a pas renvoyé `respawn` (0x47).
+    pub async fn send_respawn(&mut self) -> std::io::Result<()> {
+        if self.dead {
+            return Ok(());
+        }
+        self.dead = true;
+        self.health = 0.0;
+        let mut out = Vec::new();
+        crate::protocol::write_varint(0, &mut out);
+        self.conn.send(ids::play_s::CLIENT_COMMAND, &out).await
     }
 
     pub async fn say(&mut self, message: &str) -> std::io::Result<()> {

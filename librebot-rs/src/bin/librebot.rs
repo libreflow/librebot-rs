@@ -86,6 +86,7 @@ async fn session(bot: Bot) {
                     }
                 }
                 Ok(Event::Chat(t)) => println!("{}", t),
+                Ok(Event::Died) => println!("mort détectée (vie={:.1}) — respawn demandé au serveur", bot.health),
                 Ok(Event::Disconnected(r)) => { println!("déconnecté : {}", r); break; }
                 Err(e) => { eprintln!("erreur de protocole : {}", e); break; }
             },
