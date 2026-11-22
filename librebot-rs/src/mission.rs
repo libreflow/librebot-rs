@@ -99,6 +99,8 @@ impl Bot {
         // par segments de ~12 blocs (gère les fortes dénivelées, un A*
         // direct dépasse son budget d'expansions sur 100+ blocs de pente).
         let mut a_portee = false;
+        let mut precedent_d3 = f64::MAX;
+        let mut blocages = 0;
         for etage in 0..40 {
             let Some(p) = self.pos else { return false };
             let dx = p[0] - (x as f64 + 0.5);
@@ -109,9 +111,45 @@ impl Bot {
                 a_portee = true;
                 break;
             }
+            // Détection de blocage : sauter en boucle contre un obstacle sans
+            // progresser (canopée, falaise) coûte 200 ticks par étage pour rien.
+            if d3 >= precedent_d3 - 0.25 {
+                blocages += 1;
+                if blocages >= 3 {
+                    eprintln!(
+                        "bloqué en approche de ({}, {}, {}) : abandon de cette cible",
+                        x, y, z
+                    );
+                    self.remember_failed(x, y, z);
+                    return false;
+                }
+            } else {
+                blocages = 0;
+            }
+            precedent_d3 = d3;
             // Déjà sous/à côté du bloc : pas d'étage horizontal possible
             let horiz = (dx * dx + dz * dz).sqrt();
             if horiz < 2.0 {
+                // Cible directement en dessous (canopée, minerai sous les
+                // pieds) : creuser le support et descendre d'un niveau.
+                let fx = p[0].floor() as i32;
+                let fz = p[2].floor() as i32;
+                let py = p[1].floor() as i32;
+                if self.world.is_solid(fx, py - 1, fz) {
+                    if let Some(t) = self.dig(fx, py - 1, fz).await {
+                        for _ in 0..(t * 20.0) as usize + 40 {
+                            if self.mining_done() { break; }
+                            self.drain_packets().await;
+                            self.tick(0.05).await.ok();
+                        }
+                        // Laisser la chute d'un niveau se produire
+                        for _ in 0..40 {
+                            self.drain_packets().await;
+                            self.tick(0.05).await.ok();
+                        }
+                        continue;
+                    }
+                }
                 break;
             }
             if etage == 0 {
@@ -140,8 +178,13 @@ impl Bot {
                 "[étage {}] vers ({},{},{}) chemin={:?} (reste {:.0} blocs, pieds y={:.0})",
                 etage, gx, gy, gz, chemin, d3, p[1]
             );
-            for _ in 0..200 {
+            for i in 0..200 {
                 if self.path_len() == 0 { break; }
+                // Se défendre même en marche : un zombie ne attend pas
+                // la fin de notre chemin pour attaquer.
+                if i % 60 == 0 {
+                    self.self_defend().await;
+                }
                 self.drain_packets().await; self.tick(0.05).await.ok();
             }
         }

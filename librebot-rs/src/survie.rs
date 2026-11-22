@@ -437,7 +437,7 @@ impl Bot {
         // Les creepers proches : fuir immédiatement
         if let Some((_, creeper)) = self
             .entities
-            .plus_proche(p[0], p[1], p[2], &[entities::CREEPER], 8.0)
+            .plus_proche(p[0], p[1], p[2], &[entities::CREEPER], 6.0)
         {
             eprintln!("creeper à {:.1} blocs : fuite", (creeper.x - p[0]).hypot(creeper.z - p[2]));
             let dx = p[0] - creeper.x;
@@ -457,36 +457,96 @@ impl Bot {
                 return true;
             }
         }
-        // Mob hostile très proche : riposter avec la meilleure épée
+        // Mob hostile proche : COMBAT jusqu'à la mort du mob (pas 3 coups puis
+        // on s'en va : les zombies reviennent et tuent le bot pendant la mission).
         let mut menaces = entities::HOSTILES.to_vec();
         menaces.push(entities::CREEPER);
         let menace = self
             .entities
-            .plus_proche(p[0], p[1], p[2], &menaces, 4.5);
+            .plus_proche(p[0], p[1], p[2], &menaces, 10.0);
         match menace {
             Some((id, _)) => {
-                for arme in ["iron_sword", "stone_sword", "wooden_sword"] {
-                    if self.inventory.find(item_id(arme)).is_some() {
-                        self.select_hotbar_by_item(item_id(arme)).await;
-                        break;
-                    }
-                }
-                for _ in 0..3 {
-                    if self.attack_entity(id).await.is_err() {
-                        break;
-                    }
-                    for _ in 0..10 {
-                        self.drain_packets().await;
-                        self.tick(0.07).await.ok();
-                    }
-                    if !self.entities.alive.contains_key(&id) {
-                        break;
-                    }
-                }
-                true
+                self.announce("un hostile ! je me bats").await;
+                let survit = self.combattre(id).await;
+                self.announce_result(
+                    survit,
+                    "menace éliminée",
+                    "le mob m'échappe, je continue",
+                )
+                .await;
+                survit
             }
             None => false,
         }
+    }
+
+    /// Combat un mob jusqu'à sa mort : garde la distance d'épée, frappe à la
+    /// cadence d'attaque, poursuit s'il recule. Retourne true si le mob est mort.
+    pub async fn combattre(&mut self, id: i32) -> bool {
+        // Prendre la meilleure arme disponible
+        for arme in ["iron_sword", "stone_sword", "wooden_sword"] {
+            if self.inventory.find(item_id(arme)).is_some() {
+                self.select_hotbar_by_item(item_id(arme)).await;
+                break;
+            }
+        }
+        let debut = std::time::Instant::now();
+        while !self.disconnected && debut.elapsed() < std::time::Duration::from_secs(20) {
+            let (ex, ey, ez) = match self.entities.alive.get(&id) {
+                Some(e) => (e.x, e.y, e.z),
+                None => return true, // mort
+            };
+            // Fuite creeper en cours de combat : priorité survie
+            let Some(np) = self.pos else { return false };
+            if let Some((_, creeper)) = self
+                .entities
+                .plus_proche(np[0], np[1], np[2], &[entities::CREEPER], 5.0)
+            {
+                let dx = np[0] - creeper.x;
+                let dz = np[2] - creeper.z;
+                let d = dx.hypot(dz).max(1.0);
+                if let Some((gx, gy, gz)) =
+                    self.find_walkable_near((np[0] + dx / d * 12.0) as i32, np[1] as i32, (np[2] + dz / d * 12.0) as i32)
+                {
+                    self.goto(gx, gy, gz).await;
+                }
+            }
+            let d3 = ((ex - np[0]).powi(2) + (ey - (np[1] + 1.0)).powi(2) + (ez - np[2]).powi(2)).sqrt();
+            if d3 <= 3.0 {
+                let dx = ex - np[0];
+                let dz = ez - np[2];
+                self.yaw = (-dx).atan2(dz).to_degrees() as f32;
+                self.pitch = ((ey + 0.5) - (np[1] + 1.62)).atan2(dx.hypot(dz)) as f32;
+                if self.attack_entity(id).await.is_err() {
+                    return false;
+                }
+                // cadence d'attaque : ~0,6 s entre les coups
+                for _ in 0..12 {
+                    self.drain_packets().await;
+                    self.tick(0.05).await.ok();
+                }
+            } else if d3 < 16.0 {
+                // poursuivre
+                let d = (ex - np[0]).hypot(ez - np[2]).max(1.0);
+                let pas = (d - 2.0).min(10.0);
+                let tx = (np[0] + (ex - np[0]) / d * pas) as i32;
+                let tz = (np[2] + (ez - np[2]) / d * pas) as i32;
+                if let Some((gx, gy, gz)) = self.find_walkable_near(tx, np[1] as i32, tz) {
+                    self.goto(gx, gy, gz).await;
+                }
+                for _ in 0..60 {
+                    if self.path_len() == 0 || self.disconnected {
+                        break;
+                    }
+                    self.drain_packets().await;
+                    self.tick(0.05).await.ok();
+                }
+            } else {
+                // trop loin : abandon du combat
+                return false;
+            }
+        }
+        !self.entities.alive.contains_key(&id)
     }
 
     /// Quête de secours quand la quête principale échoue : on reste utile
@@ -609,7 +669,7 @@ impl Bot {
                 }
                 echecs_consecutifs = 0;
             }
-            for _ in 0..20 {
+            for _ in 0..6 {
                 if self.disconnected {
                     break;
                 }

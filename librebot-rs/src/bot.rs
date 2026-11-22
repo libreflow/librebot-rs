@@ -161,6 +161,9 @@ pub struct Bot {
     pub(crate) pending_send: bool,
     pub(crate) pending_respawn: bool,
     pub(crate) pending_dig_finish: Option<(i32, i32, i32, i32, &'static str)>,
+    /// Anti-blocage : ticks de sauts stériles + obstacle devant à creuser.
+    pub(crate) blocked_ticks: u32,
+    pub(crate) blocked_front: Option<(i32, i32, i32)>,
 }
 
 impl Bot {
@@ -254,6 +257,8 @@ impl Bot {
                         pending_send: false,
                         pending_respawn: false,
                         pending_dig_finish: None,
+                        blocked_ticks: 0,
+                        blocked_front: None,
                     };
                     bot.view_distance = view_distance.clamp(2, 32);
                     bot.configuration().await?;
@@ -676,7 +681,28 @@ impl Bot {
     /// Lit et traite les paquets en attente sans bloquer longtemps (drain).
     /// À appeler pendant les actions longues pour garder le monde à jour.
     /// Borné à ~500 ms réelles ; s'arrête dès que le serveur se déconnecte.
+    /// Percée : si la physique a signalé un obstacle devant (sautes stériles),
+    /// lancer le minage des blocs pieds/tête devant. Le chrono de minage
+    /// avance dans physics_tick et flush_pending envoie la fin : rien à attendre ici.
+    pub async fn dig_through_blockade(&mut self) -> bool {
+        let Some((x, y, z)) = self.blocked_front.take() else {
+            return false;
+        };
+        self.blocked_ticks = 0;
+        let mut lance = false;
+        if self.world.is_solid(x, y, z) && self.dig(x, y, z).await.is_some() {
+            lance = true;
+        }
+        if self.world.is_solid(x, y + 1, z) && self.dig(x, y + 1, z).await.is_some() {
+            lance = true;
+        }
+        lance
+    }
+
     pub async fn drain_packets(&mut self) {
+        if self.blocked_front.is_some() {
+            self.dig_through_blockade().await;
+        }
         let fin = std::time::Instant::now() + std::time::Duration::from_millis(500);
         for _ in 0..300 {
             if std::time::Instant::now() >= fin {
@@ -714,6 +740,8 @@ impl Bot {
             let dist = (dx * dx + dz * dz).sqrt();
             if dist < 0.25 {
                 self.path.pop_front();
+                self.blocked_ticks = 0;
+                self.blocked_front = None;
             } else {
                 let step = (WALK_SPEED * dt).min(dist);
                 let ux = dx / dist;
@@ -727,6 +755,8 @@ impl Bot {
                 if !blocked {
                     pos[0] = nx;
                     pos[2] = nz;
+                    self.blocked_ticks = 0;
+                    self.blocked_front = None;
                     // Yaw vanilla en DEGRÉS : 0 = +Z (sud), 90 = ouest (-X),
                     // direction regardée = (-sin(yaw), cos(yaw)).
                     self.yaw = (-dx).atan2(dz).to_degrees() as f32;
@@ -734,6 +764,12 @@ impl Bot {
                 } else if self.on_ground {
                     self.vy = JUMP_VELOCITY;
                     self.on_ground = false;
+                    // Sautes stériles répétées : mémoriser l'obstacle à creuser
+                    // (canopée, falaise) au lieu de sauter en boucle pour rien.
+                    self.blocked_ticks += 1;
+                    if self.blocked_ticks >= 10 {
+                        self.blocked_front = Some((cx, fy, cz));
+                    }
                 }
             }
         }
