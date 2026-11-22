@@ -31,7 +31,7 @@ pub fn walkable(world: &World, x: i32, y: i32, z: i32) -> bool {
         && !is_liquid(world, x, y + 1, z)
 }
 
-fn neighbors(world: &World, n: Node) -> Vec<(Node, f64)> {
+pub(crate) fn neighbors(world: &World, n: Node) -> Vec<(Node, f64)> {
     let mut out = Vec::with_capacity(6);
     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let x = n.0 + dx;
@@ -46,13 +46,23 @@ fn neighbors(world: &World, n: Node) -> Vec<(Node, f64)> {
         {
             out.push(((x, n.1 + 1, z), 1.6));
         }
-        // Chutes jusqu'à 3 blocs.
+        // Chutes jusqu'à 3 blocs (sans dégâts).
         for dy in 1..=3 {
             let y = n.1 - dy;
             if walkable(world, x, y, z)
                 && (y + 1..n.1).all(|yy| !world.is_solid(x, yy, z))
             {
                 out.push(((x, y, z), 1.0 + 0.3 * dy as f64));
+            }
+        }
+        // Grandes chutes (jusqu'à 16 blocs, ~6,5 coeurs de dégâts max, survivable) :
+        // coût très élevé pour n'y recourir qu'en dernier recours (ex: redescendre d'un toit).
+        for dy in 4..=16 {
+            let y = n.1 - dy;
+            if walkable(world, x, y, z)
+                && (y + 1..n.1).all(|yy| !world.is_solid(x, yy, z))
+            {
+                out.push(((x, y, z), 1.0 + 3.0 * dy as f64));
             }
         }
     }
@@ -65,10 +75,21 @@ fn heuristic(n: Node, goal: Node) -> f64 {
         + (n.1 - goal.1).abs() as f64 * 1.1
 }
 
+/// Résultat détaillé de `find_path` (diagnostics).
+pub(crate) struct PathDebug {
+    pub path: Option<Vec<Node>>,
+    pub expanded: usize,
+    pub budget_exceeded: bool,
+}
+
 /// Chemin du `start` (exclu) au `goal` (inclus). `None` si introuvable ou budget dépassé.
 pub fn find_path(world: &World, start: Node, goal: Node, max_nodes: usize) -> Option<Vec<Node>> {
+    find_path_dbg(world, start, goal, max_nodes).path
+}
+
+pub(crate) fn find_path_dbg(world: &World, start: Node, goal: Node, max_nodes: usize) -> PathDebug {
     if start == goal {
-        return Some(Vec::new());
+        return PathDebug { path: Some(Vec::new()), expanded: 0, budget_exceeded: false };
     }
     let mut open: BinaryHeap<Reverse<(u64, Node)>> = BinaryHeap::new();
     let mut g: HashMap<Node, f64> = HashMap::new();
@@ -87,11 +108,11 @@ pub fn find_path(world: &World, start: Node, goal: Node, max_nodes: usize) -> Op
             }
             path.reverse();
             path.remove(0);
-            return Some(path);
+            return PathDebug { path: Some(path), expanded, budget_exceeded: false };
         }
         expanded += 1;
         if expanded > max_nodes {
-            return None;
+            return PathDebug { path: None, expanded, budget_exceeded: true };
         }
         let gc = *g.get(&current).unwrap_or(&f64::INFINITY);
         for (nb, cost) in neighbors(world, current) {
@@ -104,5 +125,5 @@ pub fn find_path(world: &World, start: Node, goal: Node, max_nodes: usize) -> Op
             }
         }
     }
-    None
+    PathDebug { path: None, expanded, budget_exceeded: false }
 }

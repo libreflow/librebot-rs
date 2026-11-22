@@ -262,6 +262,9 @@ impl Conn {
     }
 
     pub async fn send(&mut self, id: i32, body: &[u8]) -> std::io::Result<()> {
+        if std::env::var_os("LIBREBOT_DEBUG").is_some() {
+            eprintln!("[send] 0x{:02x} ({} o) {:02x?}", id, body.len(), &body[..body.len().min(48)]);
+        }
         let mut payload = Vec::with_capacity(varint_len(id) + body.len());
         write_varint(id, &mut payload);
         payload.extend_from_slice(body);

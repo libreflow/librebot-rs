@@ -121,6 +121,26 @@ impl Inventory {
             .and_then(|s| s.as_ref())
     }
 
+    /// Convertit un index interne joueur en slot de la fenêtre `window_id`
+    /// (pour la fenêtre 0, interne == slot ; pour un conteneur, la section joueur
+    /// est en fin de fenêtre : inverse de `container_to_internal`).
+    pub fn window_slot(&self, window_id: u8, internal: usize) -> Option<i16> {
+        if window_id == 0 {
+            return Some(internal as i16);
+        }
+        let (_, window_len) = self.last_container?;
+        if window_len < PLAYER_SECTION {
+            return None;
+        }
+        let from_end = match internal {
+            OFFHAND => 0,
+            h if (HOTBAR_FIRST..=HOTBAR_LAST).contains(&h) => 9 - (h - HOTBAR_FIRST),
+            s if (STORAGE_FIRST..HOTBAR_FIRST).contains(&s) => 36 - (s - STORAGE_FIRST),
+            _ => return None,
+        };
+        Some((window_len - 1 - from_end) as i16)
+    }
+
     /// Slot interne contenant l'item donné (hotbar en priorité, puis stockage).
     pub fn find(&self, item_id: i32) -> Option<usize> {
         let hotbar = (HOTBAR_FIRST..=HOTBAR_LAST).filter(|&i| i < self.slots.len());
@@ -183,46 +203,333 @@ pub fn read_slot(b: &mut Body) -> Option<Option<ItemStack>> {
     Some(Some(ItemStack { id, count }))
 }
 
-/// Saute la charge utile d'un composant d'item (protocole 767/768).
-/// Retourne false uniquement pour un type totalement inconnu (longueur indecidable).
+/// Saute la charge utile d'un composant d'item (protocole 767, registre SlotComponentType 0..=56).
+/// Retourne false uniquement pour un type inconnu (longueur indécidable).
 fn skip_component(b: &mut Body) -> bool {
+    /// NBT anonyme.
+    fn skip_nbt(b: &mut Body) -> bool {
+        nbt::parse(&mut b.0).is_some()
+    }
+    /// Option<NBT anonyme> : bool puis NBT si présent.
+    fn opt_nbt(b: &mut Body) -> bool {
+        !b.bool() || skip_nbt(b)
+    }
+    /// registryEntryHolder : un varint (id de registre).
+    fn holder(b: &mut Body) -> bool {
+        b.varint();
+        true
+    }
+    /// registryEntryHolderSet / IDSet : varint count puis count varints.
+    fn holder_set(b: &mut Body) -> bool {
+        let n = b.varint().max(0) as usize;
+        for _ in 0..n {
+            b.varint();
+        }
+        true
+    }
+    /// Tableau de slots.
+    fn slot_array(b: &mut Body) -> bool {
+        let n = b.varint().max(0) as usize;
+        (0..n).all(|_| read_slot(b).is_some())
+    }
+    /// ItemBlockPredicate (can_place_on / can_break).
+    fn block_predicate(b: &mut Body) -> bool {
+        if b.bool() && !holder_set(b) {
+            return false;
+        }
+        if b.bool() {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.string();
+                let exact = b.bool();
+                b.string();
+                if !exact {
+                    b.string();
+                }
+            }
+        }
+        opt_nbt(b)
+    }
+    /// ItemEffectDetail (potion_contents).
+    fn effect_detail(b: &mut Body) -> bool {
+        b.varint();
+        b.varint();
+        b.bool();
+        b.bool();
+        b.bool();
+        if b.bool() {
+            effect_detail(b)
+        } else {
+            true
+        }
+    }
+    /// ItemFireworkExplosion (firework_explosion).
+    fn explosion(b: &mut Body) -> bool {
+        b.varint();
+        let n = b.varint().max(0) as usize;
+        for _ in 0..n {
+            b.i32();
+        }
+        let n = b.varint().max(0) as usize;
+        for _ in 0..n {
+            b.i32();
+        }
+        b.bool();
+        b.bool();
+        true
+    }
+
     let ctype = b.varint();
     match ctype {
-        // composants NBT (compound/chat)
-        0 | 5 | 6 | 9 | 13 | 20 | 22 | 23 | 27 | 31 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 42
-        | 44 | 45 | 46 | 47 | 48 | 53 | 55 => nbt::parse(&mut b.0).is_some(),
+        // anonymousNbt
+        0 | 5 | 6 | 19 | 27 | 36 | 37 | 38 | 39 | 43 | 55 | 56 => skip_nbt(b),
         // varint
-        1 | 2 | 3 | 8 | 16 | 26 | 28 | 40 | 41 | 50 => {
+        1 | 2 | 3 | 8 | 13 | 16 | 26 | 28 | 40 | 41 | 50 => {
             b.varint();
             true
         }
         // bool
-        4 | 14 | 15 | 17 | 18 | 19 | 21 => {
+        4 | 18 => {
             b.bool();
             true
         }
+        // void (rien sur le fil)
+        14 | 15 | 17 | 21 => true,
         // i32
-        24 | 25 => {
+        25 => {
             b.i32();
             true
         }
-        // liste de composants NBT (lore, can_place_on, can_break, attribute_modifiers, ...)
-        7 | 10 | 11 | 12 | 32 | 49 | 51 | 54 => {
-            let n = b.varint().max(0) as usize;
-            (0..n).all(|_| nbt::parse(&mut b.0).is_some())
+        // string
+        48 => {
+            b.string();
+            true
         }
-        // liste de slots (charged_projectiles, bundle_contents, container)
-        29 | 30 | 52 => {
+        // lore : tableau d'option<NBT>
+        7 => {
             let n = b.varint().max(0) as usize;
-            (0..n).all(|_| read_slot(b).is_some())
+            (0..n).all(|_| opt_nbt(b))
         }
-        // liste de strings (recipes)
-        43 => {
+        // enchantments / stored_enchantments : { {id, level}* , showTooltip }
+        9 | 23 => {
             let n = b.varint().max(0) as usize;
-            (0..n).all(|_| {
+            for _ in 0..n {
+                b.varint();
+                b.varint();
+            }
+            b.bool();
+            true
+        }
+        // can_place_on / can_break : { predicates*, showTooltip }
+        10 | 11 => {
+            let n = b.varint().max(0) as usize;
+            let ok = (0..n).all(|_| block_predicate(b));
+            b.bool();
+            ok
+        }
+        // attribute_modifiers : { {typeId, name, value, operation, slot}*, showTooltip }
+        12 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
                 b.string();
+                b.f64();
+                b.varint();
+                b.varint();
+            }
+            b.bool();
+            true
+        }
+        // food : {nutrition, saturation, canAlwaysEat, secondsToEat, usingConvertsTo, effects*}
+        20 => {
+            b.varint();
+            b.f32();
+            b.bool();
+            b.f32();
+            if !read_slot(b).is_some() {
+                return false;
+            }
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+                b.f32();
+            }
+            true
+        }
+        // tool : { rules* {blocks, speed?, correctDrop?}, defaultMiningSpeed, damagePerBlock }
+        22 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                holder_set(b);
+                if b.bool() {
+                    b.f32();
+                }
+                if b.bool() {
+                    b.bool();
+                }
+            }
+            b.f32();
+            b.varint();
+            true
+        }
+        // dyed_color : {color i32, showTooltip}
+        24 => {
+            b.i32();
+            b.bool();
+            true
+        }
+        // charged_projectiles / bundle_contents / container : { slots* }
+        29 | 30 | 52 => slot_array(b),
+        // potion_contents : {potionId?, customColor?, customEffects*, customName?}
+        31 => {
+            if b.bool() {
+                b.varint();
+            }
+            if b.bool() {
+                b.i32();
+            }
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+                if !effect_detail(b) {
+                    return false;
+                }
+            }
+            if b.bool() {
+                b.string();
+            }
+            true
+        }
+        // suspicious_stew_effects : { {effect, duration}* }
+        32 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+                b.varint();
+            }
+            true
+        }
+        // writable_book_content : { pages* {raw, filtered?} }
+        33 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.string();
+                if b.bool() {
+                    b.string();
+                }
+            }
+            true
+        }
+        // written_book_content : {rawTitle, filteredTitle?, author, generation, pages*, resolved}
+        34 => {
+            b.string();
+            if b.bool() {
+                b.string();
+            }
+            b.string();
+            b.varint();
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                if !skip_nbt(b) {
+                    return false;
+                }
+                if !opt_nbt(b) {
+                    return false;
+                }
+            }
+            b.bool();
+            true
+        }
+        // trim : {material holder, pattern holder, showInTooltip}
+        35 => {
+            holder(b) && holder(b) && {
+                b.bool();
                 true
-            })
+            }
+        }
+        // jukebox_playable : {hasHolder, song (holder si true, string sinon), showInTooltip}
+        42 => {
+            let has = b.bool();
+            if has {
+                b.varint();
+            } else {
+                b.string();
+            }
+            b.bool();
+            true
+        }
+        // lodestone_tracker : {globalPosition? {dimension, position}, tracked}
+        44 => {
+            if b.bool() {
+                b.string();
+                b.i64();
+            }
+            b.bool();
+            true
+        }
+        // firework_explosion
+        45 => explosion(b),
+        // fireworks : {flightDuration, explosions*}
+        46 => {
+            b.varint();
+            let n = b.varint().max(0) as usize;
+            (0..n).all(|_| explosion(b))
+        }
+        // profile : {name?, uuid?, properties* {name, value, signature?}}
+        47 => {
+            if b.bool() {
+                b.string();
+            }
+            if b.bool() {
+                b.take(16);
+            }
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.string();
+                b.string();
+                if b.bool() {
+                    b.string();
+                }
+            }
+            true
+        }
+        // banner_patterns : { layers* {pattern holder, colorId} }
+        49 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+                b.varint();
+            }
+            true
+        }
+        // pot_decorations : { decorations* varint }
+        51 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.varint();
+            }
+            true
+        }
+        // block_state : { properties* {property, value} }
+        53 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                b.string();
+                b.string();
+            }
+            true
+        }
+        // bees : { bees* {nbt, ticksInHive, minTicksInHive} }
+        54 => {
+            let n = b.varint().max(0) as usize;
+            for _ in 0..n {
+                if !skip_nbt(b) {
+                    return false;
+                }
+                b.varint();
+                b.varint();
+            }
+            true
         }
         _ => false,
     }
@@ -332,5 +639,24 @@ mod tests {
         assert_eq!(container_to_internal(10, 47), Some(9)); // 1er slot joueur = début stockage
         assert_eq!(container_to_internal(46, 47), Some(45)); // dernier = offhand
         assert_eq!(container_to_internal(9, 47), None); // slot du conteneur
+    }
+
+    #[test]
+    fn window_slot_inverse_de_container_to_internal() {
+        let mut inv = Inventory::new();
+        inv.slots.resize(46, None);
+        inv.last_container = Some((1, 47)); // table de craft : 47 slots
+        // fenêtre 0 : identité
+        assert_eq!(inv.window_slot(0, 40), Some(40));
+        // table 3x3 : la section joueur (37 slots) est en fin de fenêtre
+        for internal in [9usize, 20, 35, 36, 40, 44, 45] {
+            let w = inv.window_slot(1, internal).unwrap();
+            assert_eq!(
+                container_to_internal(w as usize, 47),
+                Some(internal),
+                "internal {internal} -> window {w}"
+            );
+        }
+        assert_eq!(inv.window_slot(1, 40), Some(41));
     }
 }

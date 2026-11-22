@@ -3,33 +3,52 @@
 
 use crate::bot::Bot;
 use crate::bot::ids;
+use crate::inventory::Inventory;
 use crate::protocol::{write_position, write_varint, write_string};
 use crate::recipes::{item_id, recipe_for};
 use crate::items_gen::item_name;
 
+/// Convertit un index interne d'inventaire en slot de la fenêtre `window_id`
+/// (identique pour la fenêtre 0 ; décalé pour un conteneur type table 3x3).
+fn wslot(inv: &Inventory, window_id: u8, internal: usize) -> i16 {
+    inv.window_slot(window_id, internal).unwrap_or(internal as i16)
+}
+
 impl Bot {
     /// Cherche un bloc par nom dans les chunks chargés, dans un rayon autour du bot.
     /// Retourne (x, y, z) du bloc le plus proche.
-    pub fn find_block(&self, block_name: &str, radius: i32) -> Option<(i32, i32, i32)> {
+    pub fn find_block(&self, block_name: &str, radius: i32, skip: &[(i32, i32, i32)]) -> Option<(i32, i32, i32)> {
         let p = self.pos?;
         let (bx, by, bz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
-        self.world.find_block_named(bx, by, bz, radius, block_name)
+        self.world.find_block_named(bx, by, bz, radius, block_name, skip)
     }
 
     /// Cherche plusieurs noms de blocs (ex: tous les types de troncs).
-    pub fn find_block_any(&self, names: &[&str], radius: i32) -> Option<(i32, i32, i32)> {
+    pub fn find_block_any(&self, names: &[&str], radius: i32, skip: &[(i32, i32, i32)]) -> Option<(i32, i32, i32)> {
         for name in names {
-            if let Some(pos) = self.find_block(name, radius) {
+            if let Some(pos) = self.find_block(name, radius, skip) {
                 return Some(pos);
             }
         }
         // Essai avec un rayon plus grand
         for name in names {
-            if let Some(pos) = self.find_block(name, radius * 3) {
+            if let Some(pos) = self.find_block(name, radius * 3, skip) {
                 return Some(pos);
             }
         }
         None
+    }
+
+    /// Suit le chemin en cours jusqu'à épuisement, avec une borne proportionnelle
+    /// à sa longueur (~6 ticks par waypoint + marge) — évite d'abandonner trop tôt
+    /// sur les longues distances.
+    pub async fn follow_path(&mut self, extra_ticks: usize) {
+        let bound = self.path_len().saturating_mul(6) + extra_ticks;
+        for _ in 0..bound {
+            if self.path_len() == 0 { break; }
+            self.drain_packets().await;
+            if self.tick(0.05).await.is_err() { break; }
+        }
     }
 
     /// Va vers un bloc et le mine. Retourne true si miné.
@@ -50,22 +69,56 @@ impl Bot {
         };
 
         if dist > 3.0 {
-            // Aller à côté du bloc (au niveau du sol à côté)
-            let side = self.find_adjacent_free(x, y, z);
-            if let Some((sx, sy, sz)) = side {
-                self.goto(sx, sy, sz).await;
-                // Attendre d'arriver (simplifié : attendre que le path soit vide)
-                for _ in 0..200 {
-                    if self.path_len() == 0 { break; }
-                    self.drain_packets().await; self.tick(0.05).await.ok();
+            // Aller à côté du bloc : toutes les cellules adjacentes libres, plus une
+            // cellule marchable proche (la cible peut être en hauteur ou dans un creux).
+            let mut candidates = self.find_adjacent_free_all(x, y, z);
+            if let Some(w) = self.find_walkable_near(x, z, y) {
+                candidates.push(w);
+            }
+            // Ne s'engager que vers une cible dont un chemin existe VRAIMENT
+            // (évite d'attendre 10 s sur une cible irrémédiablement inaccessible).
+            let start = self.pos.map(|p| {
+                (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32)
+            });
+            let mut chosen: Option<(i32, i32, i32)> = None;
+            if let Some(start) = start {
+                for c in &candidates {
+                    if crate::path::find_path(&self.world, start, *c, crate::path::MAX_EXPANSIONS).is_some() {
+                        chosen = Some(*c);
+                        break;
+                    }
+                }
+            }
+            match chosen {
+                Some((sx, sy, sz)) => {
+                    let n = self.goto(sx, sy, sz).await;
+                    if crate::bot::debug_enabled_pub() {
+                        eprintln!("[goto] vers ({sx},{sy},{sz}) -> {:?}", n);
+                    }
+                    self.follow_path(200).await;
+                }
+                None => {
+                    if crate::bot::debug_enabled_pub() {
+                        eprintln!("[goto] ({x},{y},{z}) inaccessible depuis ici ({} candidats)", candidates.len());
+                    }
+                    return false;
                 }
             }
         }
-        // Portée de minage serveur (~4,5 blocs) : ne pas miner de trop loin
+        // Portée de minage serveur (4,5 blocs 3D depuis l'œil) : si encore trop loin,
+        // tenter une dernière approche vers une cellule marchable au niveau du bloc.
         if let Some(p) = self.pos {
             if dist_to(p) > 4.5 {
-                println!("bloc trop loin ({:.1} blocs), minage ignoré", dist_to(p));
-                return false;
+                if let Some((gx, gy, gz)) = self.find_walkable_near(x, z, y) {
+                    self.goto(gx, gy, gz).await;
+                    self.follow_path(200).await;
+                }
+            }
+            if let Some(p) = self.pos {
+                if dist_to(p) > 4.5 {
+                    println!("bloc trop loin ({:.1} blocs), minage ignoré", dist_to(p));
+                    return false;
+                }
             }
         }
 
@@ -76,8 +129,9 @@ impl Bot {
                 if self.mining_done() { break; }
                 self.drain_packets().await; self.tick(0.05).await.ok();
             }
-            // Attendre la confirmation serveur : block_change reçu avec état air
-            for _ in 0..40 {
+            // Attendre la confirmation serveur : block_change reçu avec état air.
+            // Marge large : si le bot est aérien côté serveur, le minage est x5 plus lent.
+            for _ in 0..(t * 20.0 * 6.0) as usize + 120 {
                 self.drain_packets().await;
                 if self.air_confirmed.contains(&(x, y, z)) { break; }
                 self.tick(0.05).await.ok();
@@ -88,17 +142,13 @@ impl Bot {
                 return false;
             }
             // Ramasser les drops (entités item) autour du bloc miné
-            let n = self.collect_drops(8.0).await;
+            let n = self.collect_drops(12.0).await;
             if n > 0 {
                 println!("drops ramassés: {n}");
             } else {
                 // Repli : aller sur le bloc miné et attendre un peu
                 self.goto(x, y, z).await;
-                for _ in 0..60 {
-                    self.drain_packets().await;
-                    if self.path_len() == 0 { break; }
-                    self.tick(0.05).await.ok();
-                }
+                self.follow_path(60).await;
                 for _ in 0..20 {
                     self.drain_packets().await;
                     self.tick(0.05).await.ok();
@@ -112,7 +162,7 @@ impl Bot {
 
     /// Cherche une position marchable (solide dessous, air au-dessus, pas de liquide)
     /// près de (x, z), en balayant de `y_hint` vers le haut puis vers le bas.
-    fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
+    pub(crate) fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
         let y_top = (y_hint + 24).min(crate::world::MIN_Y + crate::world::WORLD_HEIGHT - 2);
         let y_bot = (y_hint - 48).max(crate::world::MIN_Y + 1);
         let mut best: Option<(i32, i32, i32, i32)> = None;
@@ -131,8 +181,10 @@ impl Bot {
         best.map(|(x, y, z, _)| (x, y, z))
     }
 
-    /// Trouve une position libre (solide en dessous, air au niveau pieds et tête) à côté d'un bloc.
-    fn find_adjacent_free(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
+    /// Positions libres (solide en dessous, air au niveau pieds et tête) à côté d'un bloc,
+    /// classées de la plus proche à la plus loin.
+    fn find_adjacent_free_all(&self, x: i32, y: i32, z: i32) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::new();
         for (dx, dz) in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(1,-1),(-1,1)] {
             let (nx, nz) = (x + dx, z + dz);
             // Chercher le sol : partir de y+2 vers le bas
@@ -141,11 +193,12 @@ impl Bot {
                     && !self.world.is_solid(nx, ny, nz)
                     && !self.world.is_solid(nx, ny + 1, nz)
                 {
-                    return Some((nx, ny, nz));
+                    out.push((nx, ny, nz));
+                    break;
                 }
             }
         }
-        None
+        out
     }
 
     /// Crafte un item par son nom. Ouvre la table si nécessaire.
@@ -191,17 +244,20 @@ impl Bot {
             }
         }
 
-        // Trouver l'identifiant de la recette parmi celles déclarées par le serveur
+        // Identifiant de la recette : celui déclaré par le serveur s'il est connu,
+        // sinon l'identifiant vanilla "minecraft:<nom>" (le serveur le valide de toute façon).
         let full_name = format!("minecraft:{}", result_name);
-        let Some(name) = self
+        let name = self
             .recipes
             .iter()
             .find(|r| r.as_str() == full_name || r.as_str() == result_name || r.ends_with(&format!(":{}", result_name)))
             .cloned()
-        else {
-            eprintln!("recette {} non déclarée par le serveur ({} recettes)", result_name, self.recipes.len());
-            return false;
-        };
+            .unwrap_or_else(|| {
+                if crate::bot::debug_enabled_pub() {
+                    eprintln!("recette {} absente de la liste serveur ({} recettes), on tente {}", result_name, self.recipes.len(), full_name);
+                }
+                full_name
+            });
 
         let ok = self.send_craft(&name, &recipe, &resolved).await;
         if ok {
@@ -278,8 +334,9 @@ impl Bot {
                 return false;
             };
             let src_count = self.inventory.slots.get(src).and_then(|s| s.as_ref()).map(|s| s.count).unwrap_or(0);
-            // ramasser le stack source
-            self.click_window_carried(window_id, src as i16, 0, 0, carried).await.ok();
+            // ramasser le stack source (slot de fenêtre, pas index interne, si conteneur)
+            let src_w = wslot(&self.inventory, window_id, src);
+            self.click_window_carried(window_id, src_w, 0, 0, carried).await.ok();
             carried = Some((*item, src_count));
             // poser `count` items un par un dans la cellule de grille
             for _ in 0..*count {
@@ -290,11 +347,14 @@ impl Bot {
             }
             // remettre le reste sur la source
             if carried.map(|(_, c)| c) > Some(0) {
-                self.click_window_carried(window_id, src as i16, 0, 0, carried).await.ok();
+                self.click_window_carried(window_id, src_w, 0, 0, carried).await.ok();
                 carried = None;
             }
-            for _ in 0..5 {
+            // Attendre la reponse du serveur (set_slot/window_items fait avancer state_id)
+            let before = self.inventory.state_id;
+            for _ in 0..30 {
                 self.drain_packets().await;
+                if self.inventory.state_id != before { break; }
             }
         }
 
@@ -317,11 +377,12 @@ impl Bot {
         // Prendre le curseur dans un slot vide de l'inventaire
         if let Some(c) = self.inventory.carried.clone() {
             if c.id == recipe.result {
-                let empty = (9..45i16).find(|&i| {
-                    self.inventory.slots.get(i as usize).map_or(true, |s| s.is_none())
+                let empty = (9..45usize).find(|&i| {
+                    self.inventory.slots.get(i).map_or(true, |s| s.is_none())
                 });
                 if let Some(slot) = empty {
-                    self.click_window_carried(window_id, slot, 0, 0, Some((c.id, c.count)))
+                    let slot_w = wslot(&self.inventory, window_id, slot);
+                    self.click_window_carried(window_id, slot_w, 0, 0, Some((c.id, c.count)))
                         .await
                         .ok();
                     for _ in 0..10 {
@@ -471,13 +532,16 @@ impl Bot {
         // Récolter 6 bûches
         let mut got = self.count_item_any(&logs);
         let mut tries = 0;
+        let mut skip: Vec<(i32, i32, i32)> = Vec::new(); // cibles déjà essayées sans succès
         while got < 6 && tries < 30 {
             tries += 1;
             // Chercher de plus en plus loin
             let radius = 20 + tries * 10;
-            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80)) {
+            if let Some((x, y, z)) = self.find_block_any(&logs, radius.min(80), &skip) {
                 println!("tronc trouvé en ({}, {}, {}) dist~{}, minage...", x, y, z, radius);
-                self.goto_and_dig(x, y, z).await;
+                if !self.goto_and_dig(x, y, z).await {
+                    skip.push((x, y, z)); // inaccessible : ne plus la re-choisir
+                }
                 // Miner aussi les blocs au-dessus (tronc vertical)
                 for dy in 1..4 {
                     if self.world.block_state(x, y + dy, z).is_some() {
@@ -497,10 +561,7 @@ impl Bot {
                     // Viser une cellule réellement marchable près de la cible aléatoire
                     if let Some((gx, gy, gz)) = self.find_walkable_near(tx, tz, p[1] as i32) {
                         self.goto(gx, gy, gz).await;
-                        for _ in 0..100 {
-                            if self.path_len() == 0 { break; }
-                            self.drain_packets().await; self.tick(0.05).await.ok();
-                        }
+                        self.follow_path(150).await;
                     }
                 }
             }
@@ -563,9 +624,9 @@ impl Bot {
         let mut tries = 0;
         while self.count_item("cobblestone") < 16 && tries < 30 {
             tries += 1;
-            if let Some((x, y, z)) = self.find_block_any(&["cobblestone", "stone", "deepslate", "tuff", "andesite", "diorite", "granite"], 20) {
+            if let Some((x, y, z)) = self.find_block_any(&["cobblestone", "stone", "deepslate", "tuff", "andesite", "diorite", "granite"], 20, &[]) {
                 self.goto_and_dig(x, y, z).await;
-            } else if let Some((x, y, z)) = self.find_block_any(&["stone", "cobblestone"], 60) {
+            } else if let Some((x, y, z)) = self.find_block_any(&["stone", "cobblestone"], 60, &[]) {
                 self.goto(x, y - 1, z).await;
             } else {
                 break;
@@ -590,14 +651,14 @@ impl Bot {
         let mut tries = 0;
         while self.count_item("raw_iron") < 8 && tries < 40 {
             tries += 1;
-            if let Some((x, y, z)) = self.find_block_any(&["iron_ore", "deepslate_iron_ore"], 30) {
+            if let Some((x, y, z)) = self.find_block_any(&["iron_ore", "deepslate_iron_ore"], 30, &[]) {
                 println!("minerai de fer en ({}, {}, {})", x, y, z);
                 self.goto_and_dig(x, y, z).await;
             } else {
                 // Descendre un peu et chercher
                 if let Some(p) = self.pos {
                     let y = (p[1] as i32) - 10;
-                    if let Some((x, _, z)) = self.find_block_any(&["iron_ore", "deepslate_iron_ore"], 40) {
+                    if let Some((x, _, z)) = self.find_block_any(&["iron_ore", "deepslate_iron_ore"], 40, &[]) {
                         self.goto(x, y.max(-59), z).await;
                     } else {
                         break;

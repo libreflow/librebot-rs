@@ -132,6 +132,7 @@ impl World {
         bz: i32,
         radius: i32,
         target_name: &str,
+        skip: &[(i32, i32, i32)],
     ) -> Option<(i32, i32, i32)> {
         let r = radius.max(16);
         let cx0 = (bx - r).div_euclid(16);
@@ -151,6 +152,9 @@ impl World {
                         let x = cx * 16 + lx;
                         let z = cz * 16 + lz;
                         for y in y0..=y1 {
+                            if skip.contains(&(x, y, z)) {
+                                continue;
+                            }
                             if self.block_state(x, y, z).map(blocks_gen::block_name)
                                 == Some(target_name)
                             {
@@ -209,9 +213,12 @@ impl World {
 fn read_paletted(b: &mut Body, count: usize) -> std::io::Result<Paletted> {
     let bits = b.u8() as u32;
     if bits == 0 {
+        let value = b.varint() as u32;
+        // Jusqu'en 1.21.4, la longueur du data array est toujours envoyée (0 pour single).
+        let _longs = b.varint().max(0);
         return Ok(Paletted {
             palette: Vec::new(),
-            single: Some(b.varint() as u32),
+            single: Some(value),
             data: Vec::new(),
             bits: 0,
         });
@@ -228,7 +235,8 @@ fn read_paletted(b: &mut Body, count: usize) -> std::io::Result<Paletted> {
     }
     let epl = if bits >= 64 { 1 } else { 64 / bits as usize };
     if epl == 0 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bits invalide")); }
-    let longs = count.div_ceil(epl);
+    // Avant 1.21.5, la longueur du tableau de données est envoyée (varint) avant les longs.
+    let longs = (b.varint().max(0) as usize).min(count.div_ceil(epl));
     let mut data = Vec::with_capacity(longs);
     for _ in 0..longs {
         data.push(b.i64() as u64);
@@ -263,9 +271,12 @@ mod tests {
             if s == 0 {
                 sections_blob.extend_from_slice(&build_section(4, &[0, 1], 1));
             } else {
+                // bits=0, valeur=0, longueur data array=0 (préfixe présent jusqu'en 1.21.4)
+                sections_blob.push(0x00);
                 sections_blob.push(0x00);
                 sections_blob.push(0x00);
             }
+            sections_blob.push(0x00);
             sections_blob.push(0x00);
             sections_blob.push(0x00);
         }
@@ -282,6 +293,7 @@ mod tests {
         }
         let epl = 64 / bits as usize;
         let longs = SECTION_VOLUME.div_ceil(epl);
+        crate::protocol::write_varint(longs as i32, &mut out); // longueur du data array (<= 1.21.4)
         for i in 0..longs {
             let value = if i == 0 { first_value as u64 } else { 0 };
             out.extend_from_slice(&value.to_be_bytes());
@@ -302,9 +314,12 @@ mod tests {
             if s == 0 {
                 sections_blob.extend_from_slice(&build_section(4, &[0, 1], 1));
             } else {
+                // bits=0, valeur=0, longueur data array=0 (préfixe présent jusqu'en 1.21.4)
+                sections_blob.push(0x00);
                 sections_blob.push(0x00);
                 sections_blob.push(0x00);
             }
+            sections_blob.push(0x00);
             sections_blob.push(0x00);
             sections_blob.push(0x00);
         }
@@ -351,16 +366,22 @@ mod tests {
             if s == 0 {
                 blob.push(0x00);
                 blob.push(0x00); // blocs : single air
+                blob.push(0x00); // longueur data array = 0
                 blob.push(0x04); // biomes : bits=4, palette globale (rien à lire)
+                crate::protocol::write_varint(4, &mut blob); // longueur du data array
                 for _ in 0..4 {
                     blob.extend_from_slice(&0u64.to_be_bytes()); // ceil(64/16) = 4 longs
                 }
             } else if s == 1 {
                 blob.push(0x00);
                 blob.push(0x01); // blocs : single stone
+                blob.push(0x00); // longueur = 0
                 blob.push(0x00);
                 blob.push(0x00); // biomes : single air
+                blob.push(0x00); // longueur = 0
             } else {
+                blob.push(0x00);
+                blob.push(0x00);
                 blob.push(0x00);
                 blob.push(0x00);
                 blob.push(0x00);
@@ -400,9 +421,14 @@ mod tests {
         let mut w = World::new();
         w.apply_map_chunk(&map_chunk_body(0, 0)).unwrap();
         // map_chunk_body met l'état 1 (stone) en section 0
-        assert_eq!(w.find_block_named(2, MIN_Y, 2, 32, "stone"), Some((0, MIN_Y, 0)));
-        assert_eq!(w.find_block_named(0, MIN_Y, 0, 32, "bedrock"), None);
+        assert_eq!(w.find_block_named(2, MIN_Y, 2, 32, "stone", &[]), Some((0, MIN_Y, 0)));
+        assert_eq!(w.find_block_named(0, MIN_Y, 0, 32, "bedrock", &[]), None);
         // Hors des chunks chargés : rien
-        assert_eq!(w.find_block_named(1000, MIN_Y, 1000, 64, "stone"), None);
+        assert_eq!(w.find_block_named(1000, MIN_Y, 1000, 64, "stone", &[]), None);
+        // skip : la position (0, MIN_Y, 0) est exclue -> plus rien dans ce chunk
+        assert_eq!(
+            w.find_block_named(2, MIN_Y, 2, 32, "stone", &[(0, MIN_Y, 0)]),
+            None
+        );
     }
 }
