@@ -27,16 +27,28 @@ async fn main() {
         "librebot-rs (protocole {}) — cible {}:{} en tant que {}",
         PROTOCOL_VERSION, cfg.host, cfg.port, cfg.username
     );
+    // Backoff exponentiel : Aternos throttle les reconnexions rapides en
+    // fermant les connexions suivantes — doubler le délai à chaque échec
+    // consécutif (jusqu'à 5 min) rend le bot fiable sur les hébergements free.
+    let mut attente = cfg.reconnect_secs;
     loop {
+        let debut = std::time::Instant::now();
         match Bot::connect_with_view(&cfg.host, cfg.port, &cfg.username, cfg.view_distance as i8).await {
             Ok(bot) => session(bot).await,
             Err(e) => eprintln!("connexion impossible : {}", e),
         }
+        let duree_session = debut.elapsed();
+        if duree_session >= std::time::Duration::from_secs(120) {
+            attente = cfg.reconnect_secs; // session saine : raz du backoff
+        } else {
+            attente = (attente.saturating_mul(2)).min(300);
+        }
         println!(
-            "reconnexion dans {} s (Ctrl-C pour arrêter)",
-            cfg.reconnect_secs
+            "reconnexion dans {} s (session écoulée {:.0} s — Ctrl-C pour arrêter)",
+            attente,
+            duree_session.as_secs_f64()
         );
-        tokio::time::sleep(std::time::Duration::from_secs(cfg.reconnect_secs)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(attente)).await;
     }
 }
 

@@ -581,8 +581,14 @@ impl Bot {
         self.drain_packets().await;
         let mut echecs_consecutifs = 0;
         let mut derniere_balise = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let mut dernier_diag = std::time::Instant::now();
         while !self.disconnected {
-            // 0) Balise de position régulière : qui cherche le bot dans le jeu
+            // 0) Diagnostic local régulier : état de la connexion en console.
+            if dernier_diag.elapsed() >= std::time::Duration::from_secs(30) {
+                println!("{}", self.rapport_diag());
+                dernier_diag = std::time::Instant::now();
+            }
+            // 0b) Balise de position régulière : qui cherche le bot dans le jeu
             //    peut lire ses coordonnées dans le chat et s'y téléporter.
             if derniere_balise.elapsed() >= std::time::Duration::from_secs(90) {
                 if let Some(p) = self.pos {

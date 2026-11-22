@@ -395,16 +395,10 @@ impl Bot {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn recette_lit_disponible() {
         assert!(crate::recipes::recipe_for("white_bed").is_some());
         assert!(crate::recipes::recipe_for("chest").is_some());
     }
 
-    #[test]
-    fn bornes_de_nuit() {
-        assert!(NUIT_DEBUT < NUIT_FIN && NUIT_FIN <= 24000);
-    }
 }

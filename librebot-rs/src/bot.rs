@@ -165,6 +165,10 @@ pub struct Bot {
     /// Anti-blocage : ticks de sauts stériles + obstacle devant à creuser.
     pub(crate) blocked_ticks: u32,
     pub(crate) blocked_front: Option<(i32, i32, i32)>,
+    /// Compteurs de diagnostic (rapport diag régulier en console).
+    pub stats_msgs_recus: u64,
+    pub stats_batches: u64,
+    pub stats_positions: u64,
 }
 
 impl Bot {
@@ -260,6 +264,9 @@ impl Bot {
                         pending_dig_finish: None,
                         blocked_ticks: 0,
                         blocked_front: None,
+                        stats_msgs_recus: 0,
+                        stats_batches: 0,
+                        stats_positions: 0,
                     };
                     bot.view_distance = view_distance.clamp(2, 32);
                     bot.configuration().await?;
@@ -340,6 +347,7 @@ impl Bot {
     pub async fn play_turn(&mut self) -> std::io::Result<Event> {
         loop {
             let pkt = self.conn.read_packet().await?;
+            self.stats_msgs_recus += 1;
             let debug = debug_enabled();
             if debug {
                 if let Packet(id, body) = &pkt {
@@ -389,6 +397,7 @@ impl Bot {
                     let out = 64.0f32.to_be_bytes().to_vec();
                     self.conn.send(ids::play_s::CHUNK_BATCH_RECEIVED, &out).await.ok();
                     self.chunks_in_batch = 0;
+                    self.stats_batches += 1;
                 }
                 Packet(ids::play_c::MAP_CHUNK, body) => {
                     self.chunks_in_batch += 1;
@@ -937,7 +946,22 @@ impl Bot {
         Ok(())
     }
 
+    /// Rapport de diagnostic : un coup d'œil fiable sur l'état de la connexion.
+    pub fn rapport_diag(&self) -> String {
+        format!(
+            "diag: paquets reçus={}, chunks={}, lots acquittés={}, positions envoyées={}, pv={:.0}, faim={}, blocages_cibles={}",
+            self.stats_msgs_recus,
+            self.world.chunk_count(),
+            self.stats_batches,
+            self.stats_positions,
+            self.health,
+            self.food,
+            self.failed_targets.len()
+        )
+    }
+
     pub async fn send_position(&mut self) -> std::io::Result<()> {
+        self.stats_positions += 1;
         let Some(p) = self.pos else { return Ok(()) };
         let mut b = Vec::with_capacity(41);
         b.extend_from_slice(&p[0].to_be_bytes());
