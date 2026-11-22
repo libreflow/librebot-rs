@@ -1,6 +1,7 @@
 //! Session client : handshake, login offline, configuration, boucle de jeu.
 //! IDs de paquets du protocole 1.21.1 (source : minecraft-data).
 
+use crate::entities::Entities;
 use crate::inventory::{window_click_body, Inventory};
 use crate::nbt;
 use crate::protocol::Conn;
@@ -67,6 +68,11 @@ pub(crate) mod ids {
         pub const UPDATE_VIEW_DISTANCE: i32 = 0x55;
         pub const SET_TIME: i32 = 0x64;
         pub const SET_ENTITY_DATA: i32 = 0x58;
+        pub const SPAWN_ENTITY: i32 = 0x01;
+        pub const REMOVE_ENTITIES: i32 = 0x42;
+        pub const ENTITY_MOVE: i32 = 0x2e;
+        pub const ENTITY_MOVE_ROT: i32 = 0x2f;
+        pub const ENTITY_TELEPORT: i32 = 0x70;
     }
     #[allow(dead_code)]
     pub mod play_s {
@@ -116,6 +122,7 @@ pub struct Bot {
     pub pitch: f32,
     vy: f64,
     pub inventory: Inventory,
+    pub entities: Entities,
     pub on_ground: bool,
     /// Waypoints (x, z) au centre des blocs — chemin en cours.
     path: VecDeque<(f64, f64)>,
@@ -128,6 +135,8 @@ pub struct Bot {
     pub open_window_id: Option<u8>,
     /// Compteur de chunks dans le batch en cours.
     pub(crate) chunks_in_batch: i32,
+    /// Blocs passés à l'air par le serveur (block_change confirmé) — preuve de casse.
+    pub air_confirmed: std::collections::HashSet<(i32, i32, i32)>,
 }
 
 impl Bot {
@@ -184,6 +193,7 @@ impl Bot {
                         pitch: 0.0,
                         vy: 0.0,
                         inventory: Inventory::new(),
+                        entities: Entities::new(),
                         on_ground: false,
                         path: VecDeque::new(),
                         mining: None,
@@ -191,6 +201,7 @@ impl Bot {
                         recipes: Vec::new(),
                         open_window_id: None,
                         chunks_in_batch: 0,
+                        air_confirmed: std::collections::HashSet::new(),
                     };
                     bot.configuration().await?;
                     return Ok(bot);
@@ -308,6 +319,9 @@ impl Bot {
                     let (x, y, z) = b.position();
                     let state = b.varint() as u32;
                     self.world.set_block_state(x, y, z, state);
+                    if crate::blocks_gen::block_name(state) == "air" {
+                        self.air_confirmed.insert((x, y, z));
+                    }
                 }
                 Packet(ids::play_c::WINDOW_ITEMS, body) => {
                     if let Err(e) = self.inventory.apply_window_items(&body) {
@@ -369,6 +383,13 @@ impl Bot {
                     let _window_id = b.u8();
                     self.open_window_id = None;
                 }
+                Packet(ids::play_c::SPAWN_ENTITY, body) => self.entities.spawn(&body),
+                Packet(ids::play_c::REMOVE_ENTITIES, body) => {
+                    self.entities.remove(&body);
+                }
+                Packet(ids::play_c::ENTITY_MOVE, body) => self.entities.move_rel(&body, false),
+                Packet(ids::play_c::ENTITY_MOVE_ROT, body) => self.entities.move_rel(&body, true),
+                Packet(ids::play_c::ENTITY_TELEPORT, body) => self.entities.teleport(&body),
                 Packet(_, _) => {}
             }
         }
@@ -472,6 +493,72 @@ impl Bot {
 
     pub fn path_len(&self) -> usize {
         self.path.len()
+    }
+
+    /// Drop d'item (entité `minecraft:item`) le plus proche, dans un rayon donné.
+    pub fn nearest_drop(&self, radius: f64) -> Option<(i32, [f64; 3])> {
+        self.pos
+            .and_then(|p| self.entities.nearest_item(p, radius))
+    }
+
+    /// Ramasse les drops d'items à proximité : se rend sur chaque entité `item`
+    /// et attend sa disparition (collect confirmé par le serveur via remove_entities).
+    /// Retourne le nombre de drops ramassés.
+    pub async fn collect_drops(&mut self, radius: f64) -> usize {
+        let dbg = debug_enabled();
+        // Attendre l'apparition des drops (le serveur les envoie après la casse du bloc)
+        for _ in 0..40 {
+            self.drain_packets().await;
+            if self.entities.count_items() > 0 {
+                break;
+            }
+            if self.tick(0.05).await.is_err() {
+                break;
+            }
+        }
+        if dbg {
+            eprintln!(
+                "[entities] {} entités suivies, {} drops item",
+                self.entities.count(),
+                self.entities.count_items()
+            );
+            if let Some(p) = self.pos {
+                for (id, pos) in self.entities.item_positions() {
+                    let d = ((pos[0] - p[0]).powi(2) + (pos[1] - p[1]).powi(2) + (pos[2] - p[2]).powi(2)).sqrt();
+                    eprintln!("[entities] item #{id} à {d:.1} blocs ({:.1}, {:.1}, {:.1})", pos[0], pos[1], pos[2]);
+                }
+            }
+        }
+        let mut got = 0;
+        for _ in 0..10 {
+            let Some((id, pos)) = self.nearest_drop(radius) else { break };
+            if dbg {
+                eprintln!("[entities] drop #{id} en ({:.1}, {:.1}, {:.1})", pos[0], pos[1], pos[2]);
+            }
+            let (tx, ty, tz) = (
+                pos[0].floor() as i32,
+                pos[1].floor() as i32,
+                pos[2].floor() as i32,
+            );
+            self.goto(tx, ty, tz).await;
+            let mut picked = false;
+            for _ in 0..100 {
+                self.drain_packets().await;
+                if !self.entities.contains(id) {
+                    picked = true;
+                    break;
+                }
+                if self.tick(0.05).await.is_err() {
+                    break;
+                }
+            }
+            if picked {
+                got += 1;
+            } else {
+                break;
+            }
+        }
+        got
     }
 
     /// Commence à miner un bloc (durée basée sur la dureté, mains nues).

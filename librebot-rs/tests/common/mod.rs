@@ -178,3 +178,30 @@ pub fn block_change_body(x: i32, y: i32, z: i32, state: i32) -> Vec<u8> {
     librebot_rs::protocol::write_varint(state, &mut b);
     b
 }
+
+/// Paquet `spawn_entity` (0x01) : id, uuid (16 zéros), type, x/y/z, angles, data, vélocité.
+pub fn spawn_entity_body(id: i32, kind: i32, x: f64, y: f64, z: f64) -> Vec<u8> {
+    let mut b = Vec::new();
+    write_varint(id, &mut b);
+    b.extend_from_slice(&[0u8; 16]);
+    write_varint(kind, &mut b);
+    b.extend_from_slice(&x.to_be_bytes());
+    b.extend_from_slice(&y.to_be_bytes());
+    b.extend_from_slice(&z.to_be_bytes());
+    b.push(0);
+    b.push(0);
+    b.push(0);
+    write_varint(0, &mut b);
+    b.extend_from_slice(&[0u8; 6]);
+    b
+}
+
+/// Paquet `remove_entities` (0x42) : count, puis les ids.
+pub fn remove_entities_body(ids: &[i32]) -> Vec<u8> {
+    let mut b = Vec::new();
+    write_varint(ids.len() as i32, &mut b);
+    for id in ids {
+        write_varint(*id, &mut b);
+    }
+    b
+}
