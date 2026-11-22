@@ -1,0 +1,30 @@
+name: librebot-rs CI
+
+on:
+  pull_request:
+    paths:
+      - "librebot-rs/**"
+      - ".github/workflows/librebot-rs.yml"
+  push:
+    paths:
+      - "librebot-rs/**"
+      - ".github/workflows/librebot-rs.yml"
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: librebot-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: librebot-rs
+      - name: cargo test
+        run: cargo test
