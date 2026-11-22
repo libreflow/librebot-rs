@@ -1,0 +1,15 @@
+[package]
+name = "ender-world-model"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "World model : carte observee, memoire episodique persistante et connaissances semantantiques"
+
+[features]
+default = ["persist"]
+persist = ["dep:rusqlite"]
+
+[dependencies]
+ender-perception.workspace = true
+serde.workspace = true
+rusqlite = { workspace = true, optional = true }

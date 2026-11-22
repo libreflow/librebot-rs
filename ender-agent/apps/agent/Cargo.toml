@@ -1,0 +1,25 @@
+[package]
+name = "ender-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Agent Minecraft autonome : boucle cognitive Observe -> Understand -> Evaluate -> Plan -> Execute -> Verify -> Learn"
+
+[features]
+default = []
+live = ["ender-minecraft/live"]
+
+[dependencies]
+ender-minecraft.workspace = true
+ender-perception.workspace = true
+ender-world-model.workspace = true
+ender-planner.workspace = true
+ender-behavior.workspace = true
+ender-skills.workspace = true
+ender-learning.workspace = true
+ender-evaluation.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

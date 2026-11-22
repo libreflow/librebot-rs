@@ -1,0 +1,50 @@
+name: ender-agent CI
+
+on:
+  pull_request:
+    paths:
+      - "ender-agent/**"
+      - ".github/workflows/ender-agent.yml"
+  push:
+    paths:
+      - "ender-agent/**"
+      - ".github/workflows/ender-agent.yml"
+
+jobs:
+  test-sim:
+    name: cargo test (simulation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ender-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2024-11-01
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ender-agent
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  check-live:
+    name: cargo check (azalea live 1.21.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ender-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2024-11-01
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ender-agent
+      - name: check ender-minecraft --features live
+        run: cargo check -p ender-minecraft --features live
+      - name: check ender-agent --features live
+        run: cargo check -p ender-agent --features live
