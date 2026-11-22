@@ -45,6 +45,8 @@ async fn chat_joueur_et_systeme() {
     let server = tokio::spawn(async move {
         let mut conn = prologue(listener).await;
         conn.send(0x2b, &login_body(7)).await.unwrap();
+        // Le client renvoie client_information (0x0a) en PLAY juste après login
+        expect(&mut conn, 0x0a).await;
         conn.send(0x40, &position_body(2.5, -50.0, 0.5, 100))
             .await
             .unwrap();

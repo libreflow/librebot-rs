@@ -79,10 +79,10 @@ pub(crate) mod ids {
         // IDs serverbound 767 — source : minecraft-data
         pub const TELEPORT_CONFIRM: i32 = 0x00;
         pub const CHAT_COMMAND: i32 = 0x04;
-        pub const USE_ENTITY: i32 = 0x16;
         pub const CHAT_MESSAGE: i32 = 0x06;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
         pub const CLIENT_COMMAND: i32 = 0x09;
+        pub const SETTINGS: i32 = 0x0a;
         pub const WINDOW_CLICK: i32 = 0x0e;
         pub const CONTAINER_CLOSE: i32 = 0x0f;
         pub const FLYING: i32 = 0x1d;
@@ -316,6 +316,9 @@ impl Bot {
                     settings.push(0);                        // enableTextFiltering
                     settings.push(0);                        // enableServerListing
                     // En 767: pas de particleStatus
+                    if debug_enabled() {
+                        eprintln!("[envoi config settings] {:02x?}", &settings);
+                    }
                     self.conn.send(ids::config_s::SETTINGS, &settings).await?;
                 }
                 Packet(ids::config_c::FINISH, _) => {
@@ -340,7 +343,12 @@ impl Bot {
             let debug = debug_enabled();
             if debug {
                 if let Packet(id, body) = &pkt {
-                    eprintln!("[pkt] 0x{:02x} ({} o)", id, body.len());
+                    eprintln!(
+                        "[pkt] 0x{:02x} ({} o) {:02x?}",
+                        id,
+                        body.len(),
+                        &body[..body.len().min(24)]
+                    );
                 }
             }
             match pkt {
@@ -353,6 +361,23 @@ impl Bot {
                 }
                 Packet(ids::play_c::LOGIN, body) => {
                     self.apply_login(&body);
+                    // Signal « client chargé » — en 767, le client vanilla renvoie
+                    // client_information en phase PLAY juste après le paquet login.
+                    // Sans lui, le serveur garde le joueur « non chargé » : invisible
+                    // pour les autres et plus aucun lot de chunks n'est envoyé.
+                    let mut settings = Vec::new();
+                    write_string("fr_FR", &mut settings);
+                    settings.push(self.view_distance as u8);
+                    crate::protocol::write_varint(0, &mut settings);
+                    settings.push(1); // chatColors
+                    settings.push(0x7f); // skinParts
+                    crate::protocol::write_varint(1, &mut settings); // mainHand
+                    settings.push(0); // enableTextFiltering
+                    settings.push(0); // enableServerListing
+                    if debug_enabled() {
+                        eprintln!("[envoi play settings] {:02x?}", &settings);
+                    }
+                    self.conn.send(ids::play_s::SETTINGS, &settings).await?;
                     return Ok(Event::Connected);
                 }
                 // chunk_batch_start (0x0c en 775) : début d'un batch de chunks
@@ -714,6 +739,12 @@ impl Bot {
                     self.disconnected = true;
                     break;
                 }
+                Ok(Ok(Event::Chat(m))) => {
+                    if debug_enabled() {
+                        eprintln!("[chat/drain] {}", m);
+                    }
+                    continue;
+                }
                 Ok(Ok(_)) => continue,
                 Ok(Err(_)) => break,
                 Err(_) => break, // timeout = plus rien en attente
@@ -919,10 +950,18 @@ impl Bot {
     }
 
     /// Exécute une commande vanilla/serveur en tant que joueur op.
-    /// En 767, chat_command n'est qu'une string — pas de signature.
+    /// Corps 767 réel : string + timestamp i64 + salt i64 + signatures
+    /// (compte varint 0) + accusé de lecture (3 octets).
     pub async fn run_command(&mut self, commande: &str) -> std::io::Result<()> {
         let mut b = Vec::new();
         write_string(commande, &mut b);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        b.extend_from_slice(&(now.as_millis() as i64).to_be_bytes());
+        b.extend_from_slice(&0i64.to_be_bytes());
+        crate::protocol::write_varint(0, &mut b); // aucune signature d'argument
+        b.extend_from_slice(&[0u8; 3]); // acknowledged
         self.conn.send(ids::play_s::CHAT_COMMAND, &b).await
     }
 
@@ -969,13 +1008,18 @@ impl Bot {
             // il pourra repasser plus tard si la situation persiste.
             return;
         }
-        match self.say(msg).await {
-            Ok(()) => {
-                self.last_chat_at = Some(now);
-                self.last_chat_text = Some(msg.to_string());
-                println!("[chat] {}", msg);
-            }
-            Err(_) => println!("[local] {}", msg),
+        // Le chat brut est rejeté par certains serveurs (chat.disabled.options)
+        // pour un client non signé ; en tant qu'op, /say passe toujours.
+        let envoye = self
+            .run_command(&format!("say {}", msg))
+            .await
+            .is_ok();
+        self.last_chat_at = Some(now);
+        self.last_chat_text = Some(msg.to_string());
+        if envoye {
+            println!("[chat] {}", msg);
+        } else {
+            self.say(msg).await.ok();
         }
     }
 

@@ -52,6 +52,7 @@ async fn inventaire_hotbar_et_click() {
     let server = tokio::spawn(async move {
         let mut conn = prologue(listener).await;
         conn.send(0x2b, &login_body(7)).await.unwrap();
+        expect(&mut conn, 0x0a).await; // client_information renvoyé en PLAY
         conn.send(0x27, &floor_chunk_body(0, 0, None)).await.unwrap();
 
         conn.send(0x13, &window_items_body(7, &[(36, 1, 64), (9, 5, 3)]))

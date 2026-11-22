@@ -18,6 +18,7 @@ async fn mine_et_pose() {
     let server = tokio::spawn(async move {
         let mut conn = prologue(listener).await;
         conn.send(0x2b, &login_body(7)).await.unwrap();
+        expect(&mut conn, 0x0a).await; // client_information renvoyé en PLAY
         conn.send(0x27, &floor_chunk_body(0, 0, None)).await.unwrap();
         conn.send(0x40, &position_body(2.5, -50.0, 0.5, 100))
             .await

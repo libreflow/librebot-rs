@@ -17,6 +17,7 @@ async fn session_complete_offline() {
     let server = tokio::spawn(async move {
         let mut conn = prologue(listener).await;
         conn.send(0x2b, &login_body(7)).await.unwrap();
+        expect(&mut conn, 0x0a).await; // client_information renvoyé en PLAY
 
         let mut pk = Vec::new();
         pk.extend_from_slice(&123456789i64.to_be_bytes());
