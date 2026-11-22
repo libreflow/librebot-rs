@@ -7,5 +7,7 @@ publish = false
 
 [dependencies]
 ender-agent = { path = "../../apps/agent" }
+ender-evaluation.workspace = true
 ender-minecraft.workspace = true
+ender-world-model.workspace = true
 tokio.workspace = true

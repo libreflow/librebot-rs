@@ -1,4 +1,4 @@
-use ender_learning::{Action, Policy, Step, TabularPolicy};
+use ender_learning::{Action, Environment, GridWorld, Policy, Step, TabularPolicy, Trainer};
 
 #[test]
 fn politique_tabulaires_apprend_l_action_recompensee() {
@@ -31,4 +31,24 @@ fn politique_epsilon_explore() {
         seen.insert(policy.select(7));
     }
     assert!(seen.len() > 1, "epsilon=1 doit explorer plusieurs actions");
+}
+
+#[test]
+fn gridworld_apprend_a_recolter_au_bon_endroit() {
+    let mut env = GridWorld::new();
+    let mut trainer = Trainer::new(100_000, 0.5);
+    for _ in 0..800 {
+        trainer.run_episode(&mut env, 64);
+        trainer.train(64);
+    }
+    trainer.policy.epsilon = 0.0;
+    let mut probe = GridWorld::new();
+    probe.x = probe.log.0;
+    probe.y = probe.log.1;
+    let key = probe.obs_key();
+    assert_eq!(
+        trainer.policy.best_action(key),
+        Action::GatherWood,
+        "la politique doit apprendre a recolter sur la case du log"
+    );
 }

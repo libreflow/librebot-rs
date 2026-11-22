@@ -47,6 +47,11 @@ pub trait MinecraftAdapter: Send + Sync {
     fn break_block(&self, pos: [i32; 3]) -> Result<(), AdapterError>;
     fn craft(&self, item: &str, count: u32) -> Result<(), AdapterError>;
     fn chat(&self, message: &str);
+
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        let _ = (kind, pos);
+        Err(AdapterError::Unsupported("spawn hostile".to_string()))
+    }
 }
 
 impl<T: MinecraftAdapter + ?Sized> MinecraftAdapter for Arc<T> {
@@ -80,6 +85,10 @@ impl<T: MinecraftAdapter + ?Sized> MinecraftAdapter for Arc<T> {
 
     fn break_block(&self, pos: [i32; 3]) -> Result<(), AdapterError> {
         (**self).break_block(pos)
+    }
+
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        (**self).debug_spawn_hostile(kind, pos)
     }
 
     fn craft(&self, item: &str, count: u32) -> Result<(), AdapterError> {
@@ -434,6 +443,23 @@ impl MinecraftAdapter for SimAdapter {
             sender: Some("sim-server".to_string()),
             content: message.to_string(),
         });
+    }
+
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        let mut sim = self.sim.lock().unwrap();
+        if !sim.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        let id = 100 + sim.entities.len() as i64;
+        let info = EntityInfo {
+            id,
+            kind: kind.to_string(),
+            pos,
+            hostile: true,
+        };
+        let _ = self.events_tx.send(GameEvent::EntitySpawned(info.clone()));
+        sim.entities.push(info);
+        Ok(())
     }
 }
 

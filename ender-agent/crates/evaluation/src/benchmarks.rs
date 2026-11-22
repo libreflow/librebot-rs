@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use ender_minecraft::MinecraftAdapter;
-use ender_perception::{BlockPos, WorldState};
+use ender_perception::{BlockPos, Value, WorldState};
 use ender_planner::{ActionDefinition, Condition, GoapPlanner, StateMap};
 use ender_skills::{FleeSkill, MoveToSkill, Skill, SkillContext, SkillStatus};
 use ender_world_model::Knowledge;
@@ -147,6 +147,26 @@ pub async fn benchmark_adaptation(
             state.apply_snapshot(&snap);
         }
     }
+    let zombie_pos = [
+        state.position[0] + 3.0,
+        state.position[1],
+        state.position[2],
+    ];
+    adapter
+        .debug_spawn_hostile("zombie", zombie_pos)
+        .expect("le sim doit pouvoir spawner un hostile");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    if let Ok(snap) = adapter.snapshot() {
+        state.apply_snapshot(&snap);
+    }
+    assert!(
+        state
+            .to_state_map()
+            .get("hostile_nearby")
+            .and_then(ender_perception::Value::as_bool)
+            .unwrap_or(false),
+        "l'injection d'hostile doit rendre hostile_nearby=true"
+    );
     let mut flee = FleeSkill::new();
     {
         let ctx = ctx(&state, adapter, knowledge);

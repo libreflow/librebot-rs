@@ -1061,7 +1061,9 @@ name = "ender-tests-simulation"
 version = "0.1.0"
 dependencies = [
  "ender-agent",
+ "ender-evaluation",
  "ender-minecraft",
+ "ender-world-model",
  "tokio",
 ]
 
