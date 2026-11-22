@@ -15,8 +15,20 @@ fn key(f: f64) -> u64 {
     f.to_bits()
 }
 
+/// Cellule liquide (le bot ne nage pas : on évite de pathfinder dans l'eau/la lave).
+fn is_liquid(world: &World, x: i32, y: i32, z: i32) -> bool {
+    matches!(
+        world.block_state(x, y, z).map(crate::blocks_gen::block_name),
+        Some("water") | Some("lava")
+    )
+}
+
 pub fn walkable(world: &World, x: i32, y: i32, z: i32) -> bool {
-    world.is_solid(x, y - 1, z) && !world.is_solid(x, y, z) && !world.is_solid(x, y + 1, z)
+    world.is_solid(x, y - 1, z)
+        && !world.is_solid(x, y, z)
+        && !world.is_solid(x, y + 1, z)
+        && !is_liquid(world, x, y, z)
+        && !is_liquid(world, x, y + 1, z)
 }
 
 fn neighbors(world: &World, n: Node) -> Vec<(Node, f64)> {

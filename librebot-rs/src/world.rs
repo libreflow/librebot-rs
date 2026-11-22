@@ -93,11 +93,11 @@ impl World {
         Ok(())
     }
 
-    /// Paquet `unload_chunk` (0x21).
+    /// Paquet `unload_chunk` (0x21) : le protocole 767 envoie chunkZ PUIS chunkX.
     pub fn apply_unload_chunk(&mut self, body: &[u8]) {
         let mut b = Body(body);
-        let x = b.i32();
         let z = b.i32();
+        let x = b.i32();
         self.chunks.remove(&(x, z));
     }
 
@@ -120,6 +120,54 @@ impl World {
 
     pub fn block_name(&self, x: i32, y: i32, z: i32) -> Option<&'static str> {
         self.block_state(x, y, z).map(blocks_gen::block_name)
+    }
+
+    /// Cherche le bloc nommé `target_name` (n'importe quel état, ex: toutes les
+    /// orientations d'une bûche) le plus proche de (bx, by, bz) dans un rayon,
+    /// uniquement dans les chunks chargés. Retourne (x, y, z) ou None.
+    pub fn find_block_named(
+        &self,
+        bx: i32,
+        by: i32,
+        bz: i32,
+        radius: i32,
+        target_name: &str,
+    ) -> Option<(i32, i32, i32)> {
+        let r = radius.max(16);
+        let cx0 = (bx - r).div_euclid(16);
+        let cx1 = (bx + r).div_euclid(16);
+        let cz0 = (bz - r).div_euclid(16);
+        let cz1 = (bz + r).div_euclid(16);
+        let y0 = (by - r).max(MIN_Y);
+        let y1 = (by + r).min(MIN_Y + WORLD_HEIGHT - 1);
+        let mut best: Option<(i32, i32, i32, i64)> = None;
+        for cx in cx0..=cx1 {
+            for cz in cz0..=cz1 {
+                if !self.has_chunk(cx, cz) {
+                    continue;
+                }
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let x = cx * 16 + lx;
+                        let z = cz * 16 + lz;
+                        for y in y0..=y1 {
+                            if self.block_state(x, y, z).map(blocks_gen::block_name)
+                                == Some(target_name)
+                            {
+                                let dx = (x - bx) as i64;
+                                let dy = (y - by) as i64;
+                                let dz = (z - bz) as i64;
+                                let d = dx * dx + dy * dy + dz * dz;
+                                if best.map(|(_, _, _, bd)| d < bd).unwrap_or(true) {
+                                    best = Some((x, y, z, d));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(x, y, z, _)| (x, y, z))
     }
 
     /// Remplace l'état d'un bloc (paquet `block_change` et pose future).
@@ -168,8 +216,11 @@ fn read_paletted(b: &mut Body, count: usize) -> std::io::Result<Paletted> {
             bits: 0,
         });
     }
+    // Palette envoyée seulement pour les petites largeurs : blocs bits 1-8, biomes bits 1-3.
+    // Au-delà, c'est la palette globale (registry) : RIEN n'est écrit sur le fil.
+    let max_palette_bits: u32 = if count == SECTION_VOLUME { 8 } else { 3 };
     let mut palette = Vec::new();
-    if bits <= 8 {
+    if bits <= max_palette_bits {
         let n = b.varint() as usize;
         for _ in 0..n {
             palette.push(b.varint() as u32);
@@ -198,6 +249,30 @@ pub fn varint(buf: &mut &[u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Corps d'un paquet map_chunk minimal : sol de stone en y=MIN_Y (section 0).
+    fn map_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&cx.to_be_bytes());
+        body.extend_from_slice(&cz.to_be_bytes());
+        body.push(0x0a);
+        body.push(0x00);
+        let mut sections_blob = Vec::new();
+        for s in 0..SECTION_COUNT {
+            sections_blob.extend_from_slice(&4096u16.to_be_bytes());
+            if s == 0 {
+                sections_blob.extend_from_slice(&build_section(4, &[0, 1], 1));
+            } else {
+                sections_blob.push(0x00);
+                sections_blob.push(0x00);
+            }
+            sections_blob.push(0x00);
+            sections_blob.push(0x00);
+        }
+        crate::protocol::write_varint(sections_blob.len() as i32, &mut body);
+        body.extend_from_slice(&sections_blob);
+        body
+    }
 
     fn build_section(bits: u8, palette: &[u32], first_value: u32) -> Vec<u8> {
         let mut out = vec![bits];
@@ -244,5 +319,90 @@ mod tests {
         assert!(w.is_solid(0, MIN_Y, 0));
         assert!(!w.is_solid(5, MIN_Y, 5));
         assert!(!w.is_solid(0, 10000, 0));
+    }
+
+    #[test]
+    fn unload_chunk_envoye_z_puis_x() {
+        let mut w = World::new();
+        w.apply_map_chunk(&map_chunk_body(7, 3)).unwrap();
+        w.apply_map_chunk(&map_chunk_body(3, 7)).unwrap();
+        assert!(w.has_chunk(7, 3));
+        assert!(w.has_chunk(3, 7));
+        // Protocole 767 : unload_chunk = chunkZ (i32) PUIS chunkX (i32).
+        let mut body = Vec::new();
+        body.extend_from_slice(&3i32.to_be_bytes()); // chunkZ = 3
+        body.extend_from_slice(&7i32.to_be_bytes()); // chunkX = 7
+        w.apply_unload_chunk(&body);
+        assert!(!w.has_chunk(7, 3), "le chunk (7,3) doit être supprimé");
+        assert!(w.has_chunk(3, 7), "le chunk (3,7) ne doit PAS être supprimé");
+    }
+
+    #[test]
+    fn palette_biome_globale_sans_palette_sur_le_fil() {
+        // Biomes en bits=4 : palette globale -> AUCUN varint de palette n'est écrit.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.push(0x0a);
+        body.push(0x00);
+        let mut blob = Vec::new();
+        for s in 0..SECTION_COUNT {
+            blob.extend_from_slice(&0u16.to_be_bytes());
+            if s == 0 {
+                blob.push(0x00);
+                blob.push(0x00); // blocs : single air
+                blob.push(0x04); // biomes : bits=4, palette globale (rien à lire)
+                for _ in 0..4 {
+                    blob.extend_from_slice(&0u64.to_be_bytes()); // ceil(64/16) = 4 longs
+                }
+            } else if s == 1 {
+                blob.push(0x00);
+                blob.push(0x01); // blocs : single stone
+                blob.push(0x00);
+                blob.push(0x00); // biomes : single air
+            } else {
+                blob.push(0x00);
+                blob.push(0x00);
+                blob.push(0x00);
+                blob.push(0x00);
+            }
+        }
+        crate::protocol::write_varint(blob.len() as i32, &mut body);
+        body.extend_from_slice(&blob);
+        let mut w = World::new();
+        w.apply_map_chunk(&body).unwrap();
+        let stone = blocks_gen::block_state_by_name("stone").unwrap();
+        assert_eq!(
+            w.block_state(0, MIN_Y + 16, 0),
+            Some(stone),
+            "la section 1 doit être lue correctement (pas de désalignement)"
+        );
+    }
+
+    #[test]
+    fn walkable_exclut_l_eau_et_la_lave() {
+        let mut w = World::new();
+        w.apply_map_chunk(&map_chunk_body(0, 0)).unwrap();
+        // sol stone en MIN_Y, air au-dessus : marchable
+        assert!(crate::path::walkable(&w, 0, MIN_Y + 1, 0));
+        let water = blocks_gen::block_state_by_name("water").unwrap();
+        w.set_block_state(0, MIN_Y + 1, 0, water);
+        assert!(
+            !crate::path::walkable(&w, 0, MIN_Y + 1, 0),
+            "une cellule d'eau ne doit pas être walkable"
+        );
+        w.set_block_state(0, MIN_Y + 1, 0, blocks_gen::block_state_by_name("air").unwrap());
+        assert!(crate::path::walkable(&w, 0, MIN_Y + 1, 0));
+    }
+
+    #[test]
+    fn find_block_named_dans_chunks_charges() {
+        let mut w = World::new();
+        w.apply_map_chunk(&map_chunk_body(0, 0)).unwrap();
+        // map_chunk_body met l'état 1 (stone) en section 0
+        assert_eq!(w.find_block_named(2, MIN_Y, 2, 32, "stone"), Some((0, MIN_Y, 0)));
+        assert_eq!(w.find_block_named(0, MIN_Y, 0, 32, "bedrock"), None);
+        // Hors des chunks chargés : rien
+        assert_eq!(w.find_block_named(1000, MIN_Y, 1000, 64, "stone"), None);
     }
 }

@@ -12,29 +12,8 @@ impl Bot {
     /// Retourne (x, y, z) du bloc le plus proche.
     pub fn find_block(&self, block_name: &str, radius: i32) -> Option<(i32, i32, i32)> {
         let p = self.pos?;
-        let (bx, by, bz) = (p[0] as i32, p[1] as i32, p[2] as i32);
-        let target_state = crate::blocks_gen::block_state_by_name(block_name)?;
-        let mut best: Option<(i32, i32, i32, i64)> = None;
-        // Parcourir uniquement les chunks chargés autour du bot (16 blocs par chunk)
-        let r = radius.max(16);
-        for dx in -r..=r {
-            for dy in -r..=r {
-                for dz in -r..=r {
-                    let (x, y, z) = (bx + dx, by + dy, bz + dz);
-                    // Ne chercher que dans les chunks chargés
-                    let cx = x.div_euclid(16);
-                    let cz = z.div_euclid(16);
-                    if !self.world.has_chunk(cx, cz) { continue; }
-                    if self.world.block_state(x, y, z) == Some(target_state) {
-                        let dist = (dx * dx + dy * dy + dz * dz) as i64;
-                        if best.map(|(_, _, _, d)| dist < d).unwrap_or(true) {
-                            best = Some((x, y, z, dist));
-                        }
-                    }
-                }
-            }
-        }
-        best.map(|(x, y, z, _)| (x, y, z))
+        let (bx, by, bz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+        self.world.find_block_named(bx, by, bz, radius, block_name)
     }
 
     /// Cherche plusieurs noms de blocs (ex: tous les types de troncs).
@@ -63,9 +42,11 @@ impl Bot {
         }).unwrap_or(0.0);
 
         let dist_to = |p: [f64; 3]| {
+            // Portée vanilla : distance 3D entre l'œil (pieds + 1.62) et le centre du bloc (max 4.5).
             let dx = p[0] - (x as f64 + 0.5);
+            let dy = (p[1] + 1.62) - (y as f64 + 0.5);
             let dz = p[2] - (z as f64 + 0.5);
-            (dx * dx + dz * dz).sqrt()
+            (dx * dx + dy * dy + dz * dz).sqrt()
         };
 
         if dist > 3.0 {
@@ -129,6 +110,27 @@ impl Bot {
         }
     }
 
+    /// Cherche une position marchable (solide dessous, air au-dessus, pas de liquide)
+    /// près de (x, z), en balayant de `y_hint` vers le haut puis vers le bas.
+    fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
+        let y_top = (y_hint + 24).min(crate::world::MIN_Y + crate::world::WORLD_HEIGHT - 2);
+        let y_bot = (y_hint - 48).max(crate::world::MIN_Y + 1);
+        let mut best: Option<(i32, i32, i32, i32)> = None;
+        for (dx, dz) in [(0, 0), (4, 0), (-4, 0), (0, 4), (0, -4), (8, 0), (-8, 0), (0, 8), (0, -8)] {
+            let (cx, cz) = (x + dx, z + dz);
+            for y in (y_bot..=y_top).rev() {
+                if crate::path::walkable(&self.world, cx, y, cz) {
+                    let d = dx * dx + dz * dz;
+                    if best.map(|(_, _, _, bd)| d < bd).unwrap_or(true) {
+                        best = Some((cx, y, cz, d));
+                    }
+                    break;
+                }
+            }
+        }
+        best.map(|(x, y, z, _)| (x, y, z))
+    }
+
     /// Trouve une position libre (solide en dessous, air au niveau pieds et tête) à côté d'un bloc.
     fn find_adjacent_free(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
         for (dx, dz) in [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(1,-1),(-1,1)] {
@@ -154,12 +156,38 @@ impl Bot {
             return false;
         };
 
-        // Vérifier les ingrédients
+        // Résoudre chaque ingrédient en un item réellement présent : toute essence de
+        // planches/bûche convient (sauf pour fabriquer des planches, où la bûche doit
+        // correspondre au type de planches demandé, sinon le serveur ne reconnaît pas
+        // la recette).
+        let mut resolved: Vec<(i32, i32)> = Vec::with_capacity(recipe.ingredients.len());
         for &(ing_id, count) in &recipe.ingredients {
-            if self.inventory.count(ing_id) < count {
-                let have = self.inventory.count(ing_id);
-                eprintln!("craft {}: il manque {} x{} (have {})", result_name, count - have, item_name(ing_id), have);
-                return false;
+            if self.inventory.count(ing_id) >= count {
+                resolved.push((ing_id, count));
+                continue;
+            }
+            let name = item_name(ing_id);
+            let suffix = if name.ends_with("_planks") {
+                Some("_planks")
+            } else if name.ends_with("_log") {
+                Some("_log")
+            } else {
+                None
+            };
+            let alt = match (suffix, result_name.ends_with("_planks")) {
+                (Some(s), false) => crate::items_gen::MC_ITEMS
+                    .iter()
+                    .find(|(id, n)| n.ends_with(s) && self.inventory.count(*id) >= count)
+                    .map(|(id, _)| *id),
+                _ => None,
+            };
+            match alt {
+                Some(id) => resolved.push((id, count)),
+                None => {
+                    let have = self.inventory.count(ing_id);
+                    eprintln!("craft {}: il manque {} x{} (have {})", result_name, count - have, item_name(ing_id), have);
+                    return false;
+                }
             }
         }
 
@@ -175,7 +203,7 @@ impl Bot {
             return false;
         };
 
-        let ok = self.send_craft(&name, &recipe).await;
+        let ok = self.send_craft(&name, &recipe, &resolved).await;
         if ok {
             // Vérifier que le résultat est bien dans l'inventaire
             let have = self.inventory.count(recipe.result);
@@ -189,7 +217,7 @@ impl Bot {
 
     /// Place les ingrédients dans la grille de craft par clics, envoie place_recipe,
     /// récupère le résultat sur le curseur dans un slot vide, puis vérifie.
-    async fn send_craft(&mut self, recipe_name: &str, recipe: &crate::recipes::Recipe) -> bool {
+    async fn send_craft(&mut self, recipe_name: &str, recipe: &crate::recipes::Recipe, resolved: &[(i32, i32)]) -> bool {
         // Si la recette nécessite une table et qu'aucune fenêtre n'est ouverte,
         // on ne peut pas crafter (il faut poser une table d'abord — géré par la mission)
         let window_id = if recipe.needs_table {
@@ -210,19 +238,33 @@ impl Bot {
         };
 
         // Plan de placement : (item, slot grille, count)
+        // `planks_id` = planches réellement disponibles (toute essence), pour les patterns.
+        let planks_id = resolved
+            .iter()
+            .find(|(id, _)| crate::recipes::is_planks_id(*id))
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| item_id("oak_planks"));
         let mut plan: Vec<(i32, i16, i32)> = Vec::new();
-        match crate::recipes::pattern_for(recipe_name.trim_start_matches("minecraft:")) {
+        match crate::recipes::pattern_for(recipe_name.trim_start_matches("minecraft:"), planks_id) {
             Some(pattern) => {
-                // pattern shaped : 1 item par cellule de la grille 3x3
+                // pattern shaped : 1 item par cellule de la grille (3x3 ou 2x2)
                 for (i, cell) in pattern.iter().enumerate() {
                     if let Some(item) = cell {
-                        plan.push((*item, grid[i], 1));
+                        if i < grid.len() {
+                            plan.push((*item, grid[i], 1));
+                        }
                     }
                 }
             }
             None => {
-                for (i, (item, count)) in recipe.ingredients.iter().enumerate() {
-                    plan.push((*item, grid[i], *count));
+                // shapeless : répartir les items un par cellule de la grille
+                let mut gi = 0;
+                for (item, count) in resolved.iter() {
+                    for _ in 0..*count {
+                        if gi >= grid.len() { break; }
+                        plan.push((*item, grid[gi], 1));
+                        gi += 1;
+                    }
                 }
             }
         }
@@ -332,6 +374,10 @@ impl Bot {
         if self.place(cx, cy - 1, cz, 1).await.is_err() {
             return false;
         }
+        // Mettre à jour le monde local : la cellule n'est plus libre.
+        if let Some(state) = crate::blocks_gen::block_state_by_name("crafting_table") {
+            self.world.set_block_state(cx, cy, cz, state);
+        }
         self.drain_packets().await; self.tick(0.3).await.ok();
 
         // Ouvrir la table : use_item_on (block_place) sur la table, face haut (767)
@@ -360,6 +406,12 @@ impl Bot {
     /// Sélectionne dans la hotbar le slot contenant l'item donné.
     /// Si l'item est hors hotbar, le déplace par clics vers un slot libre.
     pub async fn select_hotbar_by_item(&mut self, item: i32) -> bool {
+        // Fermer toute fenêtre de conteneur ouverte : les clics doivent viser la fenêtre 0.
+        if let Some(wid) = self.open_window_id {
+            self.conn.send(ids::play_s::CONTAINER_CLOSE, &[wid]).await.ok();
+            self.open_window_id = None;
+            for _ in 0..5 { self.drain_packets().await; }
+        }
         let Some(slot) = self.inventory.find(item) else { return false; };
         if (crate::inventory::HOTBAR_FIRST..=crate::inventory::HOTBAR_LAST).contains(&slot) {
             self.select_hotbar(slot - crate::inventory::HOTBAR_FIRST).await.ok();
@@ -442,11 +494,13 @@ impl Bot {
                     let angle = (tries as f64) * 2.4;
                     let tx = (p[0] + angle.cos() * 30.0) as i32;
                     let tz = (p[2] + angle.sin() * 30.0) as i32;
-                    let ty = (p[1] as i32).clamp(62, 120);
-                    self.goto(tx, ty, tz).await;
-                    for _ in 0..100 {
-                        if self.path_len() == 0 { break; }
-                        self.drain_packets().await; self.tick(0.05).await.ok();
+                    // Viser une cellule réellement marchable près de la cible aléatoire
+                    if let Some((gx, gy, gz)) = self.find_walkable_near(tx, tz, p[1] as i32) {
+                        self.goto(gx, gy, gz).await;
+                        for _ in 0..100 {
+                            if self.path_len() == 0 { break; }
+                            self.drain_packets().await; self.tick(0.05).await.ok();
+                        }
                     }
                 }
             }
@@ -456,19 +510,23 @@ impl Bot {
         println!("Bûches récoltées: {}", got);
         if got < 3 { return false; }
 
-        // Crafter des planches
+        // Crafter des planches du type de bûche réellement ramassé
         let planks = self.count_item("oak_planks") + self.count_item("spruce_planks") + self.count_item("birch_planks");
         if planks < 8 {
-            self.craft("oak_planks").await;
+            let log = crate::items_gen::MC_ITEMS
+                .iter()
+                .find(|(id, n)| n.ends_with("_log") && self.inventory.count(*id) > 0)
+                .map(|(_, n)| *n);
+            match log.and_then(crate::recipes::planks_of_log) {
+                Some(plank) => { self.craft(plank).await; }
+                None => { self.craft("oak_planks").await; }
+            }
         }
 
-        // Crafter une table de craft
-        if self.count_item("crafting_table") == 0
-            && !self.craft("crafting_table").await {
-                // Essayer avec d'autres planches
-                self.craft("spruce_planks").await;
-                self.craft("crafting_table").await;
-            }
+        // Crafter une table de craft (n'importe quelle essence de planches convient)
+        if self.count_item("crafting_table") == 0 {
+            self.craft("crafting_table").await;
+        }
         if self.count_item("crafting_table") == 0 {
             eprintln!("impossible de crafter une table");
             return false;
