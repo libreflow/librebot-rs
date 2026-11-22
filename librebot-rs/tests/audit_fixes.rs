@@ -144,6 +144,95 @@ async fn goto_sans_chemin_ne_garde_pas_un_chemin_perime() {
     server.await.unwrap();
 }
 
+/// declare_recipes avec tous les types de données possibles (0..=23).
+#[tokio::test]
+async fn declare_recipes_tous_les_types_restent_alignes() {
+    let stick = item_id("stick");
+    let table = item_id("crafting_table");
+    let planks = item_id("oak_planks");
+    let stone = item_id("stone");
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    // type 0 : shaped 1x2 (stick) + showNotification
+    entries.push(shaped_recipe_entry("minecraft:stick", 1, 2, stick, 4));
+    // type 0 : shaped 2x2 (table) + showNotification
+    entries.push(shaped_recipe_entry("minecraft:crafting_table", 2, 2, table, 1));
+    // type 20 : smithing_transform = 3 ingrédients + result (ordre réel 767 sur le fil)
+    let mut b = Vec::new();
+    write_string("minecraft:smithing_transform_x", &mut b);
+    write_varint(20, &mut b);
+    for _ in 0..3 { write_varint(0, &mut b); }
+    b.extend_from_slice(&slot_body(0, 0));
+    entries.push(b);
+    // type 21 : smithing_trim = 3 ingrédients, PAS de result
+    let mut b = Vec::new();
+    write_string("minecraft:smithing_trim_x", &mut b);
+    write_varint(21, &mut b);
+    for _ in 0..3 { write_varint(0, &mut b); }
+    entries.push(b);
+    // type 22 : decorated_pot = catégorie seule
+    let mut b = Vec::new();
+    write_string("minecraft:decorated_pot", &mut b);
+    write_varint(22, &mut b);
+    write_varint(0, &mut b);
+    entries.push(b);
+    // type 15 : smelting = group, category, ingr, result, xp f32, time varint
+    let mut b = Vec::new();
+    write_string("minecraft:stone_from_smelting", &mut b);
+    write_varint(15, &mut b);
+    write_string("", &mut b);
+    write_varint(0, &mut b);
+    write_varint(0, &mut b);
+    b.extend_from_slice(&slot_body(stone, 1));
+    b.extend_from_slice(&0.1f32.to_be_bytes());
+    write_varint(200, &mut b);
+    entries.push(b);
+    // type 19 : stonecutting = group, ingr, result
+    let mut b = Vec::new();
+    write_string("minecraft:stonecutting_x", &mut b);
+    write_varint(19, &mut b);
+    write_string("", &mut b);
+    write_varint(0, &mut b);
+    b.extend_from_slice(&slot_body(stone, 1));
+    entries.push(b);
+    // type 1 : shapeless (planks)
+    entries.push(shapeless_recipe_entry("minecraft:oak_planks"));
+
+    let mut body = Vec::new();
+    write_varint(entries.len() as i32, &mut body);
+    for e in &entries {
+        body.extend_from_slice(e);
+    }
+
+    let (listener, addr) = free_listener().await;
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x77, &body).await.unwrap();
+        conn.send(0x40, &position_body(0.5, -63.0, 0.5, 100)).await.unwrap();
+        let _ = expect(&mut conn, 0x00).await;
+    });
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    assert!(matches!(bot.play_turn().await.unwrap(), Event::Connected));
+    bot.drain_packets().await;
+    assert_eq!(
+        bot.recipes,
+        vec![
+            "minecraft:stick".to_string(),
+            "minecraft:crafting_table".to_string(),
+            "minecraft:smithing_transform_x".to_string(),
+            "minecraft:smithing_trim_x".to_string(),
+            "minecraft:decorated_pot".to_string(),
+            "minecraft:stone_from_smelting".to_string(),
+            "minecraft:stonecutting_x".to_string(),
+            "minecraft:oak_planks".to_string(),
+        ],
+        "toutes les recettes doivent être lues sans désalignement"
+    );
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn declare_recipes_shaped_avec_show_notification() {
     let (listener, addr) = free_listener().await;

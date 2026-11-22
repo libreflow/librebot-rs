@@ -122,6 +122,7 @@ pub fn floor_chunk_body(cx: i32, cz: i32, wall_x: Option<i32>) -> Vec<u8> {
             write_varint(2, &mut blob);
             write_varint(0, &mut blob);
             write_varint(1, &mut blob);
+            write_varint(256, &mut blob); // longueur du data array (présent jusqu'en 1.21.4)
             for long in 0..256u32 {
                 let v: u64 = if long < 16 {
                     0x1111111111111111
@@ -136,11 +137,13 @@ pub fn floor_chunk_body(cx: i32, cz: i32, wall_x: Option<i32>) -> Vec<u8> {
                 blob.extend_from_slice(&v.to_be_bytes());
             }
         } else {
-            blob.push(0x00);
-            write_varint(0, &mut blob);
+            blob.push(0x00); // bits = 0
+            write_varint(0, &mut blob); // valeur unique = 0 (air)
+            write_varint(0, &mut blob); // longueur du data array = 0
         }
-        blob.push(0x00);
-        write_varint(0, &mut blob);
+        blob.push(0x00); // bits biomes = 0
+        write_varint(0, &mut blob); // valeur = 0
+        write_varint(0, &mut blob); // longueur = 0
     }
     write_varint(blob.len() as i32, &mut body);
     body.extend_from_slice(&blob);

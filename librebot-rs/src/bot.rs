@@ -296,7 +296,12 @@ impl Bot {
             let debug = debug_enabled();
             if debug {
                 if let Packet(id, body) = &pkt {
-                    eprintln!("[pkt] 0x{:02x} ({} o)", id, body.len());
+                    eprintln!("[pkt] 0x{:02x} ({} o) {:02x?}", id, body.len(), &body[..body.len().min(48)]);
+                    if *id == ids::play_c::DECLARE_RECIPES
+                        && std::env::var("LIBREBOT_DUMP_RECIPES").is_ok()
+                    {
+                        let _ = std::fs::write("/tmp/declare_recipes_full.bin", body);
+                    }
                 }
             }
             match pkt {
@@ -548,7 +553,8 @@ impl Bot {
         let p = self.pos?;
         let start = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
         let goal = (x, y, z);
-        match find_path(&self.world, start, goal, crate::path::MAX_EXPANSIONS) {
+        let dbg = crate::path::find_path_dbg(&self.world, start, goal, crate::path::MAX_EXPANSIONS);
+        match dbg.path {
             Some(path) => {
                 self.path = path
                     .into_iter()
@@ -558,6 +564,20 @@ impl Bot {
                 Some(self.path.len())
             }
             None => {
+                if debug_enabled() {
+                    eprintln!(
+                        "[goto] ECHEC start={start:?} goal={goal:?} pos={p:?} expanded={} budget={} \
+                         walk_start={} walk_goal={} nb_start={} chunk_start={} chunk_goal={} nchunks={}",
+                        dbg.expanded,
+                        dbg.budget_exceeded,
+                        crate::path::walkable(&self.world, start.0, start.1, start.2),
+                        crate::path::walkable(&self.world, goal.0, goal.1, goal.2),
+                        crate::path::neighbors(&self.world, start).len(),
+                        self.world.has_chunk(start.0 >> 4, start.2 >> 4),
+                        self.world.has_chunk(goal.0 >> 4, goal.2 >> 4),
+                        self.world.chunk_count(),
+                    );
+                }
                 // Pas de chemin : vider l'ancien chemin pour ne pas le suivre par erreur.
                 self.path.clear();
                 self.path_goal = None;
@@ -605,7 +625,7 @@ impl Bot {
             }
         }
         let mut got = 0;
-        for _ in 0..10 {
+        for _ in 0..16 {
             let Some((id, pos)) = self.nearest_drop(radius) else { break };
             if dbg {
                 eprintln!("[entities] drop #{id} en ({:.1}, {:.1}, {:.1})", pos[0], pos[1], pos[2]);
@@ -615,11 +635,26 @@ impl Bot {
                 pos[1].floor() as i32,
                 pos[2].floor() as i32,
             );
-            if self.goto(tx, ty, tz).await.is_none() {
-                continue; // drop inaccessible : on essaie le suivant
+            // Viser une cellule marchable AU NIVEAU du drop (pas forcément sa cellule :
+            // l'item peut reposer sur le sol à côté, et la portée de ramassage est ~1 bloc).
+            let target = self
+                .find_walkable_near(tx, tz, ty)
+                .filter(|(gx, gy, gz)| {
+                    let dx = *gx as f64 + 0.5 - pos[0];
+                    let dy = *gy as f64 - pos[1];
+                    let dz = *gz as f64 + 0.5 - pos[2];
+                    (dx * dx + dy * dy + dz * dz).sqrt() <= 2.5
+                });
+            let dest = target.unwrap_or((tx, ty, tz));
+            if debug_enabled() {
+                eprintln!("[entities] goto drop #{id} vers {dest:?}");
             }
+            // Best effort : même sans chemin complet, se rapprocher puis attendre sur place
+            // (le ramassage se fait à ~1 bloc, sans besoin de marcher exactement dessus).
+            self.goto(dest.0, dest.1, dest.2).await;
+            self.follow_path(100).await;
             let mut picked = false;
-            for _ in 0..100 {
+            for _ in 0..150 {
                 self.drain_packets().await;
                 if !self.entities.contains(id) {
                     picked = true;
@@ -942,6 +977,11 @@ fn debug_enabled() -> bool {
     *DBG.get_or_init(|| std::env::var_os("LIBREBOT_DEBUG").is_some())
 }
 
+/// Variante publique pour les logs de mission.
+pub fn debug_enabled_pub() -> bool {
+    debug_enabled()
+}
+
 /// Saute les données d'une recette declare_recipes selon son type (protocole 767).
 /// Retourne false si le type (ou un ingrédient) est indécodable.
 fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
@@ -966,12 +1006,16 @@ fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
             let n = b.varint().max(0) as usize;
             (0..n).all(|_| skip_ingredient(b)) && skip_slot(b)
         }
-        2..=15 | 23 => {
-            // recettes spéciales (teinture, réparation...) : catégorie seule
+        // Ordre réel du registre recipe_serializer sur le fil en 1.21.1 (767),
+        // vérifié sur un paquet declare_recipes vanilla : 2..=14 spéciaux,
+        // 15..=18 smelting/blasting/smoking/campfire, 19 stonecutting,
+        // 20 smithing_transform, 21 smithing_trim, 22 crafting_decorated_pot.
+        2..=14 | 22 => {
+            // recettes spéciales (teinture, réparation, decorated_pot...) : catégorie seule
             let _category = b.varint();
             true
         }
-        16..=19 => {
+        15..=18 => {
             // smelting/blasting/smoking/campfire : group, cat, ingrédient, résultat, xp, temps
             let _group = b.string();
             let _category = b.varint();
@@ -981,17 +1025,17 @@ fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
                 true
             }
         }
-        20 => {
+        19 => {
             // stonecutting : group, ingrédient, résultat
             let _group = b.string();
             skip_ingredient(b) && skip_slot(b)
         }
-        21 | 22 => {
-            // smithing_transform / smithing_trim : template, base, addition (+ résultat si transform)
+        20 | 21 => {
+            // smithing_transform (20, + résultat) / smithing_trim (21) : template, base, addition
             skip_ingredient(b)
                 && skip_ingredient(b)
                 && skip_ingredient(b)
-                && (rtype != 21 || skip_slot(b))
+                && (rtype != 20 || skip_slot(b))
         }
         _ => false,
     }

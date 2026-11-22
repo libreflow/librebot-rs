@@ -101,6 +101,18 @@ async fn session(bot: Bot) {
                     } else {
                         println!("usage : goto <x> <y> <z>");
                     }
+                } else if let Some(rest) = msg.strip_prefix("craft ") {
+                    let ok = bot.craft(rest.trim()).await;
+                    println!("craft {} -> {}", rest.trim(), if ok { "OK" } else { "ECHEC" });
+                    bot.dump_inventory();
+                } else if let Some(rest) = msg.strip_prefix("dig ") {
+                    let coords: Vec<i32> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+                    if coords.len() == 3 {
+                        let ok = bot.goto_and_dig(coords[0], coords[1], coords[2]).await;
+                        println!("dig ({}, {}, {}) -> {}", coords[0], coords[1], coords[2], if ok { "OK" } else { "ECHEC" });
+                    } else {
+                        println!("usage : dig <x> <y> <z>");
+                    }
                 } else if let Err(e) = bot.say(&msg).await {
                     eprintln!("envoi impossible : {}", e);
                     break;
