@@ -62,6 +62,12 @@ impl Bot {
             (dx * dx + dz * dz).sqrt()
         }).unwrap_or(0.0);
 
+        let dist_to = |p: [f64; 3]| {
+            let dx = p[0] - (x as f64 + 0.5);
+            let dz = p[2] - (z as f64 + 0.5);
+            (dx * dx + dz * dz).sqrt()
+        };
+
         if dist > 3.0 {
             // Aller à côté du bloc (au niveau du sol à côté)
             let side = self.find_adjacent_free(x, y, z);
@@ -74,6 +80,13 @@ impl Bot {
                 }
             }
         }
+        // Portée de minage serveur (~4,5 blocs) : ne pas miner de trop loin
+        if let Some(p) = self.pos {
+            if dist_to(p) > 4.5 {
+                println!("bloc trop loin ({:.1} blocs), minage ignoré", dist_to(p));
+                return false;
+            }
+        }
 
         // Miner le bloc (peut prendre du temps)
         if let Some(t) = self.dig(x, y, z).await {
@@ -82,20 +95,33 @@ impl Bot {
                 if self.mining_done() { break; }
                 self.drain_packets().await; self.tick(0.05).await.ok();
             }
-            if !self.mining_done() {
-                self.drain_packets().await; self.tick(0.05).await.ok();
-            }
-            // Aller SUR le bloc miné pour ramasser le drop
-            self.goto(x, y, z).await;
-            for _ in 0..60 {
+            // Attendre la confirmation serveur : block_change reçu avec état air
+            for _ in 0..40 {
                 self.drain_packets().await;
-                if self.path_len() == 0 { break; }
+                if self.air_confirmed.contains(&(x, y, z)) { break; }
                 self.tick(0.05).await.ok();
             }
-            // Petit délai pour le ramassage
-            for _ in 0..20 {
-                self.drain_packets().await;
-                self.tick(0.05).await.ok();
+            let broke = self.air_confirmed.contains(&(x, y, z));
+            if !broke {
+                println!("bloc non cassé côté serveur en ({x}, {y}, {z})");
+                return false;
+            }
+            // Ramasser les drops (entités item) autour du bloc miné
+            let n = self.collect_drops(8.0).await;
+            if n > 0 {
+                println!("drops ramassés: {n}");
+            } else {
+                // Repli : aller sur le bloc miné et attendre un peu
+                self.goto(x, y, z).await;
+                for _ in 0..60 {
+                    self.drain_packets().await;
+                    if self.path_len() == 0 { break; }
+                    self.tick(0.05).await.ok();
+                }
+                for _ in 0..20 {
+                    self.drain_packets().await;
+                    self.tick(0.05).await.ok();
+                }
             }
             true
         } else {
@@ -299,6 +325,13 @@ impl Bot {
             if self.world.chunk_count() >= 25 { break; }
         }
         println!("chunks chargés: {}", self.world.chunk_count());
+
+        // Attendre d'avoir atterri (sinon les déplacements partent d'une position aérienne)
+        for _ in 0..200 {
+            if self.on_ground { break; }
+            self.drain_packets().await;
+            self.tick(0.05).await.ok();
+        }
 
         // Récolter 6 bûches
         let mut got = self.count_item_any(&logs);

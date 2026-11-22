@@ -77,6 +77,15 @@ impl Inventory {
         }
         let internal = if window_id == 0 {
             Some(slot as usize)
+        } else if window_id == 0xff {
+            // window -1 : indexation "inventaire brut" (0-8 hotbar, 9-35 stockage, 36-39 armure, 40 offhand)
+            match slot {
+                0..=8 => Some(HOTBAR_FIRST + slot as usize),
+                9..=35 => Some(slot as usize),
+                36..=39 => Some(5 + (slot as usize - 36)),
+                40 => Some(OFFHAND),
+                _ => None,
+            }
         } else {
             let n = match self.last_container {
                 Some((w, n)) if w == window_id => n,
