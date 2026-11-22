@@ -1093,11 +1093,18 @@ pub fn hardness(state: u32) -> f64 {
 
 /// Durée de minage estimée à mains nues (dureté * 1,5 s, plancher 50 ms).
 pub fn break_time_secs(state: u32) -> f64 {
+    break_time_secs_with(state, true)
+}
+
+/// Temps de casse vanilla : h*1.5 avec l'outil adapté, h*5 à mains nues sinon
+/// (un bloc qui requiert un outil met 5x plus longtemps sans l'outil).
+pub fn break_time_secs_with(state: u32, tool_ok: bool) -> f64 {
     let h = hardness(state);
     if h < 0.0 {
         f64::INFINITY
     } else {
-        (h * 1.5).max(0.05)
+        let mult = if tool_ok { 1.5 } else { 5.0 };
+        (h * mult).max(0.05)
     }
 }
 

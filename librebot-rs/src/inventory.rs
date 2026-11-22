@@ -183,37 +183,47 @@ pub fn read_slot(b: &mut Body) -> Option<Option<ItemStack>> {
     Some(Some(ItemStack { id, count }))
 }
 
-/// Saute la charge utile d'un composant d'item (protocole 767).
-/// Retourne false pour les composants au format complexe non supporté.
+/// Saute la charge utile d'un composant d'item (protocole 767/768).
+/// Retourne false uniquement pour un type totalement inconnu (longueur indecidable).
 fn skip_component(b: &mut Body) -> bool {
     let ctype = b.varint();
     match ctype {
-        0 | 5 | 6 | 19 => nbt::parse(&mut b.0).is_some(),
-        1 | 2 | 3 | 13 | 16 | 24 | 25 | 26 | 41 => true,
-        4 | 18 | 21 => {
+        // composants NBT (compound/chat)
+        0 | 5 | 6 | 9 | 13 | 20 | 22 | 23 | 27 | 31 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 42
+        | 44 | 45 | 46 | 47 | 48 | 53 | 55 => nbt::parse(&mut b.0).is_some(),
+        // varint
+        1 | 2 | 3 | 8 | 16 | 26 | 28 | 40 | 41 | 50 => {
+            b.varint();
+            true
+        }
+        // bool
+        4 | 14 | 15 | 17 | 18 | 19 | 21 => {
             b.bool();
             true
         }
-        7 => {
+        // i32
+        24 | 25 => {
+            b.i32();
+            true
+        }
+        // liste de composants NBT (lore, can_place_on, can_break, attribute_modifiers, ...)
+        7 | 10 | 11 | 12 | 32 | 49 | 51 | 54 => {
             let n = b.varint().max(0) as usize;
             (0..n).all(|_| nbt::parse(&mut b.0).is_some())
         }
-        9 | 23 => {
+        // liste de slots (charged_projectiles, bundle_contents, container)
+        29 | 30 | 52 => {
             let n = b.varint().max(0) as usize;
-            for _ in 0..n {
-                b.varint();
-                b.varint();
-            }
-            b.bool();
-            true
+            (0..n).all(|_| read_slot(b).is_some())
         }
-        20 => {
-            b.varint();
-            let _ = b.f32();
-            b.bool();
-            true
+        // liste de strings (recipes)
+        43 => {
+            let n = b.varint().max(0) as usize;
+            (0..n).all(|_| {
+                b.string();
+                true
+            })
         }
-        14 | 15 | 17 | 28 => true,
         _ => false,
     }
 }
@@ -224,14 +234,27 @@ pub fn skip_slot(b: &mut Body) -> bool {
     read_slot(b).is_some()
 }
 
-/// Corps d'un clic de fenêtre : ramasser / poser un stack entier (mode 0).
-/// Item curseur supposé vide côté bot.
+/// Écrit un slot dans un corps de paquet (count varint ; si > 0 : id, 0 composants ajoutes, 0 retires).
+pub fn write_slot(out: &mut Vec<u8>, slot: Option<(i32, i32)>) {
+    match slot {
+        None => crate::protocol::write_varint(0, out),
+        Some((id, count)) => {
+            crate::protocol::write_varint(count, out);
+            crate::protocol::write_varint(id, out);
+            crate::protocol::write_varint(0, out);
+            crate::protocol::write_varint(0, out);
+        }
+    }
+}
+
+/// Corps d'un clic de fenêtre (container_click 767) avec l'item curseur réel du bot.
 pub fn window_click_body(
     window_id: u8,
     state_id: i32,
     slot: i16,
     button: i8,
     mode: i32,
+    carried: Option<(i32, i32)>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(window_id);
@@ -240,7 +263,7 @@ pub fn window_click_body(
     out.push(button as u8);
     crate::protocol::write_varint(mode, &mut out);
     crate::protocol::write_varint(0, &mut out); // changedSlots vide
-    crate::protocol::write_varint(0, &mut out); // cursorItem vide
+    write_slot(&mut out, carried); // cursorItem
     out
 }
 

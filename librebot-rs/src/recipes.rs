@@ -17,6 +17,36 @@ pub fn item_exists(name: &str) -> bool {
     MC_ITEMS.iter().any(|(_, n)| *n == name)
 }
 
+/// Pattern 3x3 (row-major, None = cellule vide) pour les recettes shaped en table.
+/// Retourne None pour les recettes shapeless (placement séquentiel en 2x2/3x3).
+pub fn pattern_for(result_name: &str) -> Option<Vec<Option<i32>>> {
+    let st = Some(item_id("stick"));
+    let shape: Vec<Vec<Option<i32>>> = if result_name.ends_with("_pickaxe") {
+        let m = Some(item_id(if result_name.starts_with("wooden") { "oak_planks" }
+            else if result_name.starts_with("stone") { "cobblestone" }
+            else if result_name.starts_with("iron") { "iron_ingot" }
+            else if result_name.starts_with("golden") { "gold_ingot" }
+            else if result_name.starts_with("diamond") { "diamond" }
+            else { "oak_planks" }));
+        vec![vec![m, m, m], vec![None, st, None], vec![None, st, None]]
+    } else if result_name.ends_with("_axe") {
+        let m = Some(item_id(if result_name.starts_with("wooden") { "oak_planks" } else { "cobblestone" }));
+        vec![vec![m, m, None], vec![m, st, None], vec![None, st, None]]
+    } else if result_name.ends_with("_sword") {
+        let m = Some(item_id(if result_name.starts_with("wooden") { "oak_planks" } else { "cobblestone" }));
+        vec![vec![m, None, None], vec![m, None, None], vec![None, st, None]]
+    } else if result_name.ends_with("_shovel") {
+        let m = Some(item_id(if result_name.starts_with("wooden") { "oak_planks" } else { "cobblestone" }));
+        vec![vec![m, None, None], vec![None, st, None], vec![None, st, None]]
+    } else if result_name.ends_with("_hoe") {
+        let m = Some(item_id(if result_name.starts_with("wooden") { "oak_planks" } else { "cobblestone" }));
+        vec![vec![m, m, None], vec![None, st, None], vec![None, st, None]]
+    } else {
+        return None;
+    };
+    Some(shape.into_iter().flatten().collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub result: i32,

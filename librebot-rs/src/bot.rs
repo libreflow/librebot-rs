@@ -131,7 +131,9 @@ pub struct Bot {
     /// Waypoints (x, z) au centre des blocs — chemin en cours.
     path: VecDeque<(f64, f64)>,
     /// Minage en cours : (x, y, z, secondes restantes, séquence, nom du bloc).
-    mining: Option<(i32, i32, i32, f64, i32, &'static str)>,
+    mining: Option<(i32, i32, i32, f64, i32, &'static str, u32)>,
+    /// Slot de hotbar sélectionné (pour estimer l'outil en main).
+    pub selected_hotbar: usize,
     pub(crate) sequence: i32,
     /// Recettes déclarées par le serveur (declare_recipes) : index = recipeId.
     pub recipes: Vec<String>,
@@ -205,6 +207,7 @@ impl Bot {
                         on_ground: false,
                         path: VecDeque::new(),
                         mining: None,
+                        selected_hotbar: 0,
                         sequence: 0,
                         recipes: Vec::new(),
                         open_window_id: None,
@@ -605,9 +608,13 @@ impl Bot {
         b.push(face as u8);
         crate::protocol::write_varint(seq, &mut b);
         self.conn.send(ids::play_s::BLOCK_DIG, &b).await.ok()?;
-        let total = crate::blocks_gen::break_time_secs(state);
+        let held = self.inventory.held(self.selected_hotbar).map(|s| s.id);
+        let tool_ok = held
+            .map(|id| crate::items_gen::item_name(id).contains("pickaxe"))
+            .unwrap_or(false);
+        let total = crate::blocks_gen::break_time_secs_with(state, tool_ok);
         let name = crate::blocks_gen::block_name(state);
-        self.mining = Some((x, y, z, total, seq, name));
+        self.mining = Some((x, y, z, total, seq, name, 0));
         Some(total)
     }
 
@@ -640,14 +647,29 @@ impl Bot {
     pub async fn select_hotbar(&mut self, hotbar_index: usize) -> std::io::Result<()> {
         let mut b = Vec::new();
         b.extend_from_slice(&(hotbar_index as i16).to_be_bytes());
-        self.conn.send(ids::play_s::HELD_ITEM_SLOT, &b).await
+        self.conn.send(ids::play_s::HELD_ITEM_SLOT, &b).await?;
+        self.selected_hotbar = hotbar_index.min(8);
+        Ok(())
     }
 
     /// Clic gauche (ramasser/poser un stack) sur un slot de la fenêtre 0.
     /// Retourne l'état d'inventaire utilisé.
     pub async fn click_slot(&mut self, slot: i16) -> std::io::Result<i32> {
+        let carried = self.inventory.carried.clone().map(|s| (s.id, s.count));
+        self.click_window_carried(0, slot, 0, 0, carried).await
+    }
+
+    /// Clic dans une fenêtre avec un item curseur explicite (suivi local du craft).
+    pub async fn click_window_carried(
+        &mut self,
+        window_id: u8,
+        slot: i16,
+        button: i8,
+        mode: i32,
+        carried: Option<(i32, i32)>,
+    ) -> std::io::Result<i32> {
         let state = self.inventory.state_id;
-        let body = window_click_body(0, state, slot, 0, 0);
+        let body = window_click_body(window_id, state, slot, button, mode, carried);
         self.conn.send(ids::play_s::WINDOW_CLICK, &body).await?;
         Ok(state)
     }
@@ -717,23 +739,29 @@ impl Bot {
             let raw_y = pos[1] + self.vy * dt;
             let mut final_y = raw_y.max(crate::world::MIN_Y as f64);
             if self.vy < 0.0 {
-                let below = (final_y - 0.001).floor() as i32;
+                // Balayer TOUS les blocs traversés entre l'ancien et le nouveau y :
+                // a vitesse terminale (~3,9 blocs/tick) on peut traverser un bloc sinon.
                 let (fx, fz) = (pos[0].floor() as i32, pos[2].floor() as i32);
-                if below >= crate::world::MIN_Y && self.world.is_solid(fx, below, fz) {
-                    let top = below as f64 + 1.0;
-                    if top <= pos[1] {
-                        final_y = top;
-                        if !self.on_ground {
-                            self.on_ground = true;
-                            println!(
-                                "atterri sur {} en ({:.2}, {}, {:.2})",
-                                self.world.block_name(fx, below, fz).unwrap_or("?"),
-                                pos[0],
-                                top,
-                                pos[2]
-                            );
+                let y_top = (pos[1] - 0.001).floor() as i32;
+                let y_bottom = (final_y - 0.001).floor() as i32;
+                for by in y_bottom..=y_top {
+                    if by >= crate::world::MIN_Y && self.world.is_solid(fx, by, fz) {
+                        let top = by as f64 + 1.0;
+                        if top <= pos[1] + 0.001 {
+                            final_y = top;
+                            if !self.on_ground {
+                                self.on_ground = true;
+                                println!(
+                                    "atterri sur {} en ({:.2}, {}, {:.2})",
+                                    self.world.block_name(fx, by, fz).unwrap_or("?"),
+                                    pos[0],
+                                    top,
+                                    pos[2]
+                                );
+                            }
+                            self.vy = 0.0;
+                            break;
                         }
-                        self.vy = 0.0;
                     }
                 }
             }
@@ -747,21 +775,30 @@ impl Bot {
         }
         // client_tick_end (0x0d en 775) : envoyé à chaque tick pour débloquer l'envoi des chunks
         // tick_end désactivé en 767
-        if let Some((x, y, z, remaining, seq, name)) = self.mining {
+        if let Some((x, y, z, remaining, seq, name, attempts)) = self.mining {
             let remaining = remaining - dt;
             if remaining <= 0.0 {
-                self.mining = None;
+                // Renvoyer FINISH_DIGGING jusqu'à confirmation serveur (block_change air),
+                // avec un plafond pour ne pas spammer un bloc incassable.
                 let mut b = Vec::new();
                 crate::protocol::write_varint(2, &mut b);
                 crate::protocol::write_position(x, y, z, &mut b);
                 b.push(0u8);
                 crate::protocol::write_varint(seq, &mut b);
                 self.conn.send(ids::play_s::BLOCK_DIG, &b).await?;
-                println!("miné {} en ({}, {}, {})", name, x, y, z);
-                // Marquer le bloc comme air localement (le serveur confirmera par block_change)
-                self.world.set_block_state(x, y, z, 0);
+                if self.air_confirmed.contains(&(x, y, z)) || attempts >= 100 {
+                    self.mining = None;
+                    self.world.set_block_state(x, y, z, 0);
+                    if self.air_confirmed.contains(&(x, y, z)) {
+                        println!("miné {} en ({}, {}, {})", name, x, y, z);
+                    } else {
+                        println!("minage abandonné (non confirmé) en ({}, {}, {})", x, y, z);
+                    }
+                } else {
+                    self.mining = Some((x, y, z, 0.05, seq, name, attempts + 1));
+                }
             } else {
-                self.mining = Some((x, y, z, remaining, seq, name));
+                self.mining = Some((x, y, z, remaining, seq, name, attempts));
             }
         }
         Ok(())

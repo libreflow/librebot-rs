@@ -175,13 +175,24 @@ impl Bot {
             return false;
         };
 
-        self.send_craft(&name, recipe.needs_table).await
+        let ok = self.send_craft(&name, &recipe).await;
+        if ok {
+            // Vérifier que le résultat est bien dans l'inventaire
+            let have = self.inventory.count(recipe.result);
+            if have == 0 {
+                eprintln!("craft {}: résultat absent de l'inventaire", result_name);
+                return false;
+            }
+        }
+        ok
     }
 
-    async fn send_craft(&mut self, recipe_name: &str, needs_table: bool) -> bool {
+    /// Place les ingrédients dans la grille de craft par clics, envoie place_recipe,
+    /// récupère le résultat sur le curseur dans un slot vide, puis vérifie.
+    async fn send_craft(&mut self, recipe_name: &str, recipe: &crate::recipes::Recipe) -> bool {
         // Si la recette nécessite une table et qu'aucune fenêtre n'est ouverte,
         // on ne peut pas crafter (il faut poser une table d'abord — géré par la mission)
-        let window_id = if needs_table {
+        let window_id = if recipe.needs_table {
             match self.open_window_id {
                 Some(id) => id,
                 None => {
@@ -192,20 +203,92 @@ impl Bot {
         } else {
             0 // inventaire (2x2)
         };
+        let grid: &[i16] = if recipe.needs_table {
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9]
+        } else {
+            &[1, 2, 3, 4]
+        };
 
+        // Plan de placement : (item, slot grille, count)
+        let mut plan: Vec<(i32, i16, i32)> = Vec::new();
+        match crate::recipes::pattern_for(recipe_name.trim_start_matches("minecraft:")) {
+            Some(pattern) => {
+                // pattern shaped : 1 item par cellule de la grille 3x3
+                for (i, cell) in pattern.iter().enumerate() {
+                    if let Some(item) = cell {
+                        plan.push((*item, grid[i], 1));
+                    }
+                }
+            }
+            None => {
+                for (i, (item, count)) in recipe.ingredients.iter().enumerate() {
+                    plan.push((*item, grid[i], *count));
+                }
+            }
+        }
+
+        // Vider la grille d'abord (placer le contenu ailleurs) : on suppose la grille vide
+        // (le serveur met a jour via set_slot ; on drain entre chaque clic).
+        let mut carried: Option<(i32, i32)> = None;
+        for (item, gslot, count) in &plan {
+            let Some(src) = self.inventory.find(*item) else {
+                eprintln!("craft: ingrédient {item} introuvable");
+                return false;
+            };
+            let src_count = self.inventory.slots.get(src).and_then(|s| s.as_ref()).map(|s| s.count).unwrap_or(0);
+            // ramasser le stack source
+            self.click_window_carried(window_id, src as i16, 0, 0, carried).await.ok();
+            carried = Some((*item, src_count));
+            // poser `count` items un par un dans la cellule de grille
+            for _ in 0..*count {
+                self.click_window_carried(window_id, *gslot, 1, 0, carried).await.ok();
+                if let Some((_, c)) = carried.as_mut() {
+                    *c -= 1;
+                }
+            }
+            // remettre le reste sur la source
+            if carried.map(|(_, c)| c) > Some(0) {
+                self.click_window_carried(window_id, src as i16, 0, 0, carried).await.ok();
+                carried = None;
+            }
+            for _ in 0..5 {
+                self.drain_packets().await;
+            }
+        }
+
+        // Envoyer place_recipe (makeAll)
         let mut b = Vec::new();
         b.push(window_id);
         write_string(recipe_name, &mut b);
         b.push(1); // makeAll = true
-        if self.conn.send(ids::play_s::CRAFT_RECIPE, &b).await.is_ok() {
-            // Attendre que l'item arrive dans l'inventaire
-            for _ in 0..40 {
-                self.drain_packets().await; self.tick(0.05).await.ok();
-            }
-            true
-        } else {
-            false
+        if self.conn.send(ids::play_s::CRAFT_RECIPE, &b).await.is_err() {
+            return false;
         }
+        // Attendre que le résultat arrive sur le curseur
+        for _ in 0..40 {
+            self.drain_packets().await;
+            self.tick(0.05).await.ok();
+            if self.inventory.carried.is_some() {
+                break;
+            }
+        }
+        // Prendre le curseur dans un slot vide de l'inventaire
+        if let Some(c) = self.inventory.carried.clone() {
+            if c.id == recipe.result {
+                let empty = (9..45i16).find(|&i| {
+                    self.inventory.slots.get(i as usize).map_or(true, |s| s.is_none())
+                });
+                if let Some(slot) = empty {
+                    self.click_window_carried(window_id, slot, 0, 0, Some((c.id, c.count)))
+                        .await
+                        .ok();
+                    for _ in 0..10 {
+                        self.drain_packets().await;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Cherche une cellule libre (solide dessous, air dessus) à proximité.
