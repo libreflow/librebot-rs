@@ -21,6 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2024-11-01
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ender-agent
@@ -37,6 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2024-11-01
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ender-agent
