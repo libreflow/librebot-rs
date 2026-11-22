@@ -49,6 +49,13 @@ Une fois connecté, la **mission survie se lance toute seule** (phases bois, pie
 Ensuite le bot affiche le chat et envoie tout ce que tu tapes sur stdin.
 Commandes : `goto x y z` pour marcher jusqu'à un bloc (A*), tout le reste est dit dans le chat.
 
+## 📖 Documentation
+
+- [`docs/wiki.md`](docs/wiki.md) — **wiki des compétences** : ce que le bot sait faire
+  (connexion, monde, déplacement, minage, craft, chat, mission survie, API).
+- [`docs/audit.md`](docs/audit.md) — **audit complet** : architecture, couverture
+  protocolaire (paquets traités/envoyés), robustesse, limites et pistes d'amélioration.
+
 ## 🧪 Tests
 
 ```bash
