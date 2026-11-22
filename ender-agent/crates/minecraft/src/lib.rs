@@ -8,6 +8,17 @@ pub use adapter::AzaleaAdapter;
 pub use client::Client;
 pub use events::{EntityInfo, GameEvent};
 
+pub const VANILLA_RECIPES: &[(&str, u32, &[(&str, u32)])] = &[
+    ("minecraft:oak_planks", 4, &[("minecraft:oak_log", 1)]),
+    ("minecraft:stick", 4, &[("minecraft:oak_planks", 2)]),
+    ("minecraft:crafting_table", 1, &[("minecraft:oak_planks", 4)]),
+    (
+        "minecraft:wooden_pickaxe",
+        1,
+        &[("minecraft:oak_planks", 3), ("minecraft:stick", 2)],
+    ),
+];
+
 pub fn normalize_id(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(start) = trimmed.find("minecraft:") {

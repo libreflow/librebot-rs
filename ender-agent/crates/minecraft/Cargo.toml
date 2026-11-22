@@ -8,7 +8,7 @@ description = "Couche Minecraft : evenements de jeu et adaptateurs (simulation +
 [features]
 default = ["sim"]
 sim = []
-live = ["dep:azalea", "dep:anyhow", "dep:tracing", "dep:bevy_ecs"]
+live = ["dep:azalea", "dep:azalea-inventory", "dep:anyhow", "dep:tracing", "dep:bevy_ecs"]
 
 [dependencies]
 tokio.workspace = true
@@ -17,4 +17,5 @@ thiserror.workspace = true
 anyhow = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 azalea = { workspace = true, optional = true }
+azalea-inventory = { workspace = true, optional = true }
 bevy_ecs = { workspace = true, optional = true }
