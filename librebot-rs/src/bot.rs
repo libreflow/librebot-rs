@@ -73,6 +73,9 @@ pub(crate) mod ids {
         pub const UPDATE_VIEW_DISTANCE: i32 = 0x55;
         pub const SET_TIME: i32 = 0x64;
         pub const SET_ENTITY_DATA: i32 = 0x58;
+        /// Objet ramassé : le serveur émet « collect » (pas de destroy) — purger
+        /// l'entité item, sinon le bot re-cible en boucle un drop déjà ramassé.
+        pub const COLLECT: i32 = 0x6f;
     }
     #[allow(dead_code)]
     pub mod play_s {
@@ -517,6 +520,12 @@ impl Bot {
                     let y = b.f64();
                     let z = b.f64();
                     self.entities.teleport(id, x, y, z);
+                }
+                Packet(ids::play_c::COLLECT, body) => {
+                    let mut b = Body(&body);
+                    let collecte = b.varint();
+                    let _collecteur = b.varint();
+                    self.entities.remove(&[collecte]);
                 }
                 Packet(ids::play_c::ENTITY_DESTROY, body) => {
                     let mut b = Body(&body);

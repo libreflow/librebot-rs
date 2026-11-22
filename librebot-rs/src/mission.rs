@@ -255,11 +255,34 @@ impl Bot {
             return false;
         };
 
-        // Vérifier les ingrédients
-        for &(ing_id, count) in &recipe.ingredients {
-            if self.inventory.count(ing_id) < count {
-                let have = self.inventory.count(ing_id);
-                eprintln!("craft {}: il manque {} x{} (have {})", result_name, count - have, item_name(ing_id), have);
+        // Vérifier les ingrédients — avec tolérance aux planches variées :
+        // la recette vanilla accepte n'importe quelles planches, la nôtre porte
+        // oak_planks ; additionner toutes les planches possédées.
+        let oak_planks = item_id("oak_planks");
+        const PLANCHES: &[&str] = &[
+            "oak_planks", "spruce_planks", "birch_planks", "jungle_planks",
+            "acacia_planks", "dark_oak_planks", "mangrove_planks",
+            "cherry_planks", "bamboo_planks",
+        ];
+        for (ing_id, count) in &recipe.ingredients {
+            let ok = if *ing_id == oak_planks {
+                PLANCHES
+                    .iter()
+                    .map(|p| self.inventory.count(item_id(p)))
+                    .sum::<i32>()
+                    >= *count
+            } else {
+                self.inventory.count(*ing_id) >= *count
+            };
+            if !ok {
+                let have = self.inventory.count(*ing_id);
+                eprintln!(
+                    "craft {}: il manque {} x{} (have {})",
+                    result_name,
+                    count - have,
+                    item_name(*ing_id),
+                    have
+                );
                 return false;
             }
         }
@@ -277,6 +300,40 @@ impl Bot {
         };
 
         self.send_craft(&name, recipe.needs_table).await
+    }
+
+    /// Craft les planches correspondant aux bûches réellement possédées.
+    /// Indispensable hors des forêts de chêne : récolter du cherry_log puis
+    /// vouloir crafter du oak_planks ne peut qu'échouer.
+    pub async fn craft_planches_intelligent(&mut self) -> bool {
+        const LOGS: &[(&str, &str)] = &[
+            ("oak_log", "oak_planks"),
+            ("spruce_log", "spruce_planks"),
+            ("birch_log", "birch_planks"),
+            ("jungle_log", "jungle_planks"),
+            ("acacia_log", "acacia_planks"),
+            ("dark_oak_log", "dark_oak_planks"),
+            ("mangrove_log", "mangrove_planks"),
+            ("cherry_log", "cherry_planks"),
+            ("bamboo_block", "bamboo_planks"),
+        ];
+        for (log, planks) in LOGS {
+            if self.count_item(log) > 0 && self.craft(planks).await {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Ouvre (ou pose) une table de craft — requis par toute recette 3x3.
+    pub async fn ouvrir_table(&mut self) -> bool {
+        if self.open_window_id.is_some() {
+            return true;
+        }
+        if self.count_item("crafting_table") == 0 && !self.craft("crafting_table").await {
+            return false;
+        }
+        self.place_and_open_crafting_table().await
     }
 
     async fn send_craft(&mut self, recipe_name: &str, needs_table: bool) -> bool {
@@ -473,19 +530,27 @@ impl Bot {
         println!("Bûches récoltées: {}", got);
         if got < 3 { return false; }
 
-        // Crafter des planches
-        let planks = self.count_item("oak_planks") + self.count_item("spruce_planks") + self.count_item("birch_planks");
-        if planks < 8 {
-            self.craft("oak_planks").await;
+        // Crafter des planches — depuis les bûches réellement possédées
+        // (cherry_log ne donne PAS du oak_planks : adapter le type)
+        let compter_planches = |b: &Bot| -> i32 {
+            b.count_item_any(&[
+                "oak_planks", "spruce_planks", "birch_planks", "jungle_planks",
+                "acacia_planks", "dark_oak_planks", "mangrove_planks",
+                "cherry_planks", "bamboo_planks",
+            ])
+        };
+        let mut garde = 0;
+        while compter_planches(self) < 8 && garde < 8 {
+            garde += 1;
+            if !self.craft_planches_intelligent().await {
+                break; // plus aucune bûche
+            }
         }
 
-        // Crafter une table de craft
-        if self.count_item("crafting_table") == 0
-            && !self.craft("crafting_table").await {
-                // Essayer avec d'autres planches
-                self.craft("spruce_planks").await;
-                self.craft("crafting_table").await;
-            }
+        // Crafter une table de craft (les recettes acceptent toute planche)
+        if self.count_item("crafting_table") == 0 {
+            self.craft("crafting_table").await;
+        }
         if self.count_item("crafting_table") == 0 {
             eprintln!("impossible de crafter une table");
             return false;
@@ -529,7 +594,9 @@ impl Bot {
             if let Some((x, y, z)) = self.find_block_any(&["cobblestone", "stone", "deepslate", "tuff", "andesite", "diorite", "granite"], 20) {
                 self.goto_and_dig(x, y, z).await;
             } else if let Some((x, y, z)) = self.find_block_any(&["stone", "cobblestone"], 60) {
-                self.goto(x, y - 1, z).await;
+                // Marcher jusqu'à la pierre ET la miner (sinon la boucle
+                // repartait vers un bloc jamais miné et ne progressait jamais).
+                self.goto_and_dig(x, y, z).await;
             } else {
                 break;
             }
@@ -537,6 +604,11 @@ impl Bot {
         println!("Cobblestone: {}", self.count_item("cobblestone"));
         if self.count_item("cobblestone") < 12 { return false; }
 
+        // Les outils en pierre sont des recettes 3x3 : table de craft requise.
+        if !self.ouvrir_table().await {
+            eprintln!("impossible d'ouvrir une table pour les outils en pierre");
+            return false;
+        }
         self.craft("stone_pickaxe").await;
         self.craft("stone_axe").await;
         self.craft("stone_sword").await;
@@ -588,6 +660,13 @@ impl Bot {
             self.smelt("raw_iron", carburant, "iron_ingot", besoin).await;
         }
 
+        // Les outils en fer sont des recettes 3x3 : rouvrir une table
+        // (le fourneau utilise une autre fenêtre, inutilisable pour le craft).
+        self.close_window().await.ok();
+        if !self.ouvrir_table().await {
+            eprintln!("impossible d'ouvrir une table pour les outils en fer");
+            return false;
+        }
         self.craft("iron_pickaxe").await;
         self.craft("iron_sword").await;
         self.craft("iron_axe").await;

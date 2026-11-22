@@ -164,15 +164,10 @@ impl Bot {
         }
     }
 
-    /// Ouvre (ou pose) une table de craft, crafte l'item, puis referme la fenêtre.
+    /// Ouvre (ou pose) une table de craft via l'aide partagée, crafte, referme.
     async fn craft_avec_table(&mut self, nom: &str) -> bool {
-        if self.open_window_id.is_none() {
-            if self.count_item("crafting_table") == 0 && !self.craft("crafting_table").await {
-                return false;
-            }
-            if !self.place_and_open_crafting_table().await {
-                return false;
-            }
+        if !self.ouvrir_table().await {
+            return false;
         }
         let ok = self.craft(nom).await;
         self.close_window().await.ok();
@@ -316,10 +311,11 @@ impl Bot {
         b.push(0);
         crate::protocol::write_varint(seq, &mut b);
         let _ = self.conn.send(crate::bot::ids::play_s::BLOCK_PLACE, &b).await;
-        // Le serveur fait sauter la nuit : attendre le matin (au pire ~10 min réelles).
+        // Le serveur fait sauter la nuit : attendre le matin. S'il refuse le
+        // lit (monstres proches), abandon après 30 s : ne pas geler la mission.
         let debut = std::time::Instant::now();
         while self.day_time >= NUIT_DEBUT && self.day_time < NUIT_FIN && !self.disconnected {
-            if debut.elapsed() > std::time::Duration::from_secs(600) {
+            if debut.elapsed() > std::time::Duration::from_secs(30) {
                 break;
             }
             self.drain_packets().await;

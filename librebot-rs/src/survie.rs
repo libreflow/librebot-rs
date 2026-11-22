@@ -193,10 +193,6 @@ impl Bot {
                         self.click_slot_in(wid, ws).await.ok();
                     }
                 }
-                let cible_res = obtenus_avant + nb;
-                if self.inventory.count(res) >= cible_res.min(obtenus_avant + nb) {
-                    break;
-                }
                 if self.inventory.count(res) - obtenus_avant >= nb {
                     break;
                 }
