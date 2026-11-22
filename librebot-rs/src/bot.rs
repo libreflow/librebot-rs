@@ -63,7 +63,7 @@ pub(crate) mod ids {
         pub const CHUNK_BATCH_START: i32 = 0x0d;
         pub const SPAWN_ENTITY: i32 = 0x01;
         pub const REL_ENTITY_MOVE: i32 = 0x2e;
-        pub const ENTITY_MOVE_LOOK: i32 = 0x30;
+        pub const ENTITY_MOVE_LOOK: i32 = 0x2f;
         pub const ENTITY_TELEPORT: i32 = 0x70;
         pub const ENTITY_DESTROY: i32 = 0x42;
         pub const CHUNK_BATCH_FINISHED: i32 = 0x0c;
@@ -78,6 +78,7 @@ pub(crate) mod ids {
     pub mod play_s {
         // IDs serverbound 767 — source : minecraft-data
         pub const TELEPORT_CONFIRM: i32 = 0x00;
+        pub const CHAT_COMMAND: i32 = 0x04;
         pub const USE_ENTITY: i32 = 0x16;
         pub const CHAT_MESSAGE: i32 = 0x06;
         pub const CHUNK_BATCH_RECEIVED: i32 = 0x08;
@@ -917,7 +918,19 @@ impl Bot {
         self.conn.send(ids::play_s::POSITION_LOOK, &b).await
     }
 
+    /// Exécute une commande vanilla/serveur en tant que joueur op.
+    /// En 767, chat_command n'est qu'une string — pas de signature.
+    pub async fn run_command(&mut self, commande: &str) -> std::io::Result<()> {
+        let mut b = Vec::new();
+        write_string(commande, &mut b);
+        self.conn.send(ids::play_s::CHAT_COMMAND, &b).await
+    }
+
     pub async fn say(&mut self, message: &str) -> std::io::Result<()> {
+        // Une commande (préfixe /) passe par chat_command, pas chat_message.
+        if let Some(cmd) = message.strip_prefix('/') {
+            return self.run_command(cmd).await;
+        }
         let mut b = Vec::new();
         write_string(message, &mut b);
         let now = SystemTime::now()
@@ -960,6 +973,7 @@ impl Bot {
             Ok(()) => {
                 self.last_chat_at = Some(now);
                 self.last_chat_text = Some(msg.to_string());
+                println!("[chat] {}", msg);
             }
             Err(_) => println!("[local] {}", msg),
         }

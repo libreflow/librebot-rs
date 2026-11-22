@@ -572,8 +572,28 @@ impl Bot {
     /// Chaque décision est annoncée dans le chat (sans spam) avec son résultat,
     /// et un échec fait passer le bot à une autre quête.
     pub async fn run_mission(&mut self) {
+        // Assainissement de session (le bot est op) : retirer une éventuelle
+        // potion d'invisibilité traînante et forcer le mode survie — sinon le
+        // bot est un fantôme que personne ne voit, même téléporté sur eux.
+        self.run_command("effect clear @s").await.ok();
+        self.drain_packets().await;
+        self.run_command("gamemode survival").await.ok();
+        self.drain_packets().await;
         let mut echecs_consecutifs = 0;
+        let mut derniere_balise = std::time::Instant::now() - std::time::Duration::from_secs(60);
         while !self.disconnected {
+            // 0) Balise de position régulière : qui cherche le bot dans le jeu
+            //    peut lire ses coordonnées dans le chat et s'y téléporter.
+            if derniere_balise.elapsed() >= std::time::Duration::from_secs(90) {
+                if let Some(p) = self.pos {
+                    self.announce(&format!(
+                        "me voici : x={} y={} z={}",
+                        p[0] as i32, p[1] as i32, p[2] as i32
+                    ))
+                    .await;
+                }
+                derniere_balise = std::time::Instant::now();
+            }
             // 1) Réflexes vitaux d'abord
             if self.self_defend().await {
                 continue;
