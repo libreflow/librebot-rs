@@ -57,12 +57,21 @@ impl Skill for FleeSkill {
                     ctx.state.position[1],
                     ctx.state.position[2] + (ctx.state.position[2] - hostile.pos[2]),
                 ];
-                let norm = distance(ctx.state.position, away).max(1.0);
-                let target = [
-                    ctx.state.position[0] + (away[0] - ctx.state.position[0]) / norm * 12.0,
-                    ctx.state.position[1],
-                    ctx.state.position[2] + (away[2] - ctx.state.position[2]) / norm * 12.0,
-                ];
+                let norm = distance(ctx.state.position, away);
+                // Si l'hostile est exactement sur le joueur, norm = 0 : fuir vers +X.
+                let target = if norm < 1.0 {
+                    [
+                        ctx.state.position[0] + 12.0,
+                        ctx.state.position[1],
+                        ctx.state.position[2],
+                    ]
+                } else {
+                    [
+                        ctx.state.position[0] + (away[0] - ctx.state.position[0]) / norm * 12.0,
+                        ctx.state.position[1],
+                        ctx.state.position[2] + (away[2] - ctx.state.position[2]) / norm * 12.0,
+                    ]
+                };
                 let target = [
                     target[0].floor() as i32,
                     target[1].floor() as i32,

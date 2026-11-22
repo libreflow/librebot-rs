@@ -1076,9 +1076,12 @@ pub fn block_name(state: u32) -> &'static str {
     MC_BLOCKS[index_of(state)].1
 }
 
-/// Trouve le premier block state dont le nom correspond (ex: "oak_log").
+/// Trouve le premier état de bloc dont le nom correspond (ex: "oak_log").
+/// Les lignes couvrent [ligne précédente.0, ligne.0) : le premier état est donc
+/// la borne max de la ligne précédente (0 pour la première ligne).
 pub fn block_state_by_name(name: &str) -> Option<u32> {
-    MC_BLOCKS.iter().find(|r| r.1 == name).map(|r| r.0)
+    let i = MC_BLOCKS.iter().position(|r| r.1 == name)?;
+    Some(if i == 0 { 0 } else { MC_BLOCKS[i - 1].0 })
 }
 
 /// Un bloc est solide s'il a une hitbox de collision (shapes non vides).

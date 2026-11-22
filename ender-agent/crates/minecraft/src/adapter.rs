@@ -712,6 +712,18 @@ impl MinecraftAdapter for AzaleaAdapter {
         let out_count = recipe.1;
         let inputs: &[(&str, u32)] = recipe.2;
         let crafts = count.div_ceil(out_count);
+        // L'inventaire du joueur est une grille 2x2 : les recettes d'outils (motif 3x3)
+        // exigent une table de craft ouverte, non gérée par cet adaptateur.
+        if item.ends_with("_pickaxe")
+            || item.ends_with("_axe")
+            || item.ends_with("_sword")
+            || item.ends_with("_hoe")
+            || item.ends_with("_shovel")
+        {
+            return Err(AdapterError::Unsupported(format!(
+                "craft 3x3 impossible sans table de craft ouverte: {item}"
+            )));
+        }
         let mut guard = self.link.client.lock().unwrap();
         let bot = guard.as_mut().ok_or(AdapterError::NotConnected)?;
         let handle = bot

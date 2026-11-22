@@ -130,6 +130,11 @@ pub struct Bot {
     pub on_ground: bool,
     /// Waypoints (x, z) au centre des blocs — chemin en cours.
     path: VecDeque<(f64, f64)>,
+    /// Objectif (x, y, z) du chemin en cours — sert à re-pathfinder si bloqué.
+    path_goal: Option<(i32, i32, i32)>,
+    /// Dernière position connue et compteur d'immobilité (détection de blocage).
+    last_pos: [f64; 3],
+    stuck_ticks: u32,
     /// Minage en cours : (x, y, z, secondes restantes, séquence, nom du bloc).
     mining: Option<(i32, i32, i32, f64, i32, &'static str, u32)>,
     /// Slot de hotbar sélectionné (pour estimer l'outil en main).
@@ -206,6 +211,9 @@ impl Bot {
                         entities: Entities::new(),
                         on_ground: false,
                         path: VecDeque::new(),
+                        path_goal: None,
+                        last_pos: [0.0; 3],
+                        stuck_ticks: 0,
                         mining: None,
                         selected_hotbar: 0,
                         sequence: 0,
@@ -326,6 +334,27 @@ impl Bot {
                 }
                 Packet(ids::play_c::UNLOAD_CHUNK, body) => {
                     self.world.apply_unload_chunk(&body);
+                }
+                // multi_block_change (0x49) : section (x,z,y) + records (stateId << 12 | index YZX)
+                Packet(ids::play_c::MULTI_BLOCK_CHANGE, body) => {
+                    let mut b = Body(&body);
+                    let v = b.i64();
+                    let cx = (v >> 42) as i32; // x : 22 bits signés (bits 42-63)
+                    let cz = ((v << 22) >> 42) as i32; // z : bits 20-41
+                    let sy = ((v << 44) >> 44) as i32; // y (section) : bits 0-19
+                    let n = b.varint().max(0) as usize;
+                    for _ in 0..n {
+                        let rec = b.varint();
+                        let state = (rec >> 12) as u32;
+                        let idx = rec & 0xFFF;
+                        let x = cx * 16 + (idx & 15);
+                        let y = sy * 16 + (idx >> 8);
+                        let z = cz * 16 + ((idx >> 4) & 15);
+                        self.world.set_block_state(x, y, z, state);
+                        if crate::blocks_gen::block_name(state) == "air" {
+                            self.air_confirmed.insert((x, y, z));
+                        }
+                    }
                 }
                 Packet(ids::play_c::BLOCK_CHANGE, body) => {
                     let mut b = Body(&body);
@@ -464,7 +493,7 @@ impl Bot {
         let _reduced_debug = b.bool();
         let _respawn_screen = b.bool();
         let _limited_crafting = b.bool();
-        let _world_id = b.varint();
+        // En 767, plus de world_id séparé : vient directement le SpawnInfo (worldState).
         if let Some(dim) = Self::parse_world(&mut b) {
             self.dimension = Some(dim);
         }
@@ -473,8 +502,9 @@ impl Bot {
 
     /// Partie `SpawnInfo` du login : renvoie le nom de la dimension.
     fn parse_world(b: &mut Body) -> Option<String> {
-        let dimension = b.string();
-        b.take(8);
+        let _dimension_id = b.varint(); // SpawnInfo 767 : id de registre (varint) d'abord
+        let dimension = b.string(); // puis le nom ("minecraft:overworld")
+        b.take(8); // hashedSeed
         let _gamemode = b.u8();
         let _previous = b.u8();
         let _debug = b.bool();
@@ -518,12 +548,22 @@ impl Bot {
         let p = self.pos?;
         let start = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
         let goal = (x, y, z);
-        let path = find_path(&self.world, start, goal, crate::path::MAX_EXPANSIONS)?;
-        self.path = path
-            .into_iter()
-            .map(|(px, _py, pz)| (px as f64 + 0.5, pz as f64 + 0.5))
-            .collect();
-        Some(self.path.len())
+        match find_path(&self.world, start, goal, crate::path::MAX_EXPANSIONS) {
+            Some(path) => {
+                self.path = path
+                    .into_iter()
+                    .map(|(px, _py, pz)| (px as f64 + 0.5, pz as f64 + 0.5))
+                    .collect();
+                self.path_goal = Some(goal);
+                Some(self.path.len())
+            }
+            None => {
+                // Pas de chemin : vider l'ancien chemin pour ne pas le suivre par erreur.
+                self.path.clear();
+                self.path_goal = None;
+                None
+            }
+        }
     }
 
     pub fn path_len(&self) -> usize {
@@ -575,7 +615,9 @@ impl Bot {
                 pos[1].floor() as i32,
                 pos[2].floor() as i32,
             );
-            self.goto(tx, ty, tz).await;
+            if self.goto(tx, ty, tz).await.is_none() {
+                continue; // drop inaccessible : on essaie le suivant
+            }
             let mut picked = false;
             for _ in 0..100 {
                 self.drain_packets().await;
@@ -717,11 +759,13 @@ impl Bot {
                 if !blocked {
                     pos[0] = nx;
                     pos[2] = nz;
-                    self.yaw = (dz).atan2(dx) as f32;
+                    // Convention Minecraft : yaw 0 = +Z, forward = (-sin(yaw), cos(yaw)).
+                    self.yaw = (-dx).atan2(dz) as f32;
                     moved = true;
                 } else if self.on_ground {
                     self.vy = JUMP_VELOCITY;
                     self.on_ground = false;
+                    self.stuck_ticks = 0; // un saut en cours n'est pas un blocage
                 }
             }
         }
@@ -738,10 +782,10 @@ impl Bot {
             self.vy = (self.vy - GRAVITY * dt).max(TERMINAL_VELOCITY);
             let raw_y = pos[1] + self.vy * dt;
             let mut final_y = raw_y.max(crate::world::MIN_Y as f64);
+            let (fx, fz) = (pos[0].floor() as i32, pos[2].floor() as i32);
             if self.vy < 0.0 {
                 // Balayer TOUS les blocs traversés entre l'ancien et le nouveau y :
                 // a vitesse terminale (~3,9 blocs/tick) on peut traverser un bloc sinon.
-                let (fx, fz) = (pos[0].floor() as i32, pos[2].floor() as i32);
                 let y_top = (pos[1] - 0.001).floor() as i32;
                 let y_bottom = (final_y - 0.001).floor() as i32;
                 for by in y_bottom..=y_top {
@@ -764,12 +808,61 @@ impl Bot {
                         }
                     }
                 }
+            } else if self.vy > 0.0 {
+                // Montee : collision avec le plafond (tete a pos[1] + 1.8).
+                let head_old = (pos[1] + 1.8 - 0.001).floor() as i32;
+                let head_new = (final_y + 1.8 - 0.001).floor() as i32;
+                for by in head_old..=head_new {
+                    if self.world.is_solid(fx, by, fz) {
+                        final_y = by as f64 - 1.8;
+                        self.vy = 0.0;
+                        break;
+                    }
+                }
             }
             pos[1] = final_y;
             moved = true;
         }
 
         self.pos = Some(pos);
+        // Détection de blocage : si un chemin est en cours mais qu'on n'avance plus,
+        // re-calculer un chemin depuis la position courante vers l'objectif.
+        if !self.path.is_empty() {
+            let cur = pos;
+            let d = ((cur[0] - self.last_pos[0]).powi(2)
+                + (cur[1] - self.last_pos[1]).powi(2)
+                + (cur[2] - self.last_pos[2]).powi(2))
+            .sqrt();
+            if d < 0.02 {
+                self.stuck_ticks += 1;
+            } else {
+                self.stuck_ticks = 0;
+            }
+            if self.stuck_ticks > 40 {
+                self.stuck_ticks = 0;
+                let start = (
+                    cur[0].floor() as i32,
+                    cur[1].floor() as i32,
+                    cur[2].floor() as i32,
+                );
+                let goal = self.path_goal;
+                let new_path =
+                    goal.and_then(|g| find_path(&self.world, start, g, crate::path::MAX_EXPANSIONS));
+                match new_path {
+                    Some(path) => {
+                        self.path = path
+                            .into_iter()
+                            .map(|(px, _py, pz)| (px as f64 + 0.5, pz as f64 + 0.5))
+                            .collect();
+                    }
+                    None => {
+                        self.path.clear();
+                        self.path_goal = None;
+                    }
+                }
+            }
+            self.last_pos = cur;
+        }
         if moved {
             self.send_position().await?;
         }
@@ -854,12 +947,17 @@ fn debug_enabled() -> bool {
 fn skip_recipe_data(b: &mut Body, rtype: i32) -> bool {
     match rtype {
         0 => {
-            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, notification
+            // crafting_shaped : group, category, w, h, w*h ingrédients, résultat, showNotification
             let _group = b.string();
             let _category = b.varint();
             let w = b.varint().max(0) as usize;
             let h = b.varint().max(0) as usize;
-            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b)) && skip_slot(b)
+            (0..w.saturating_mul(h)).all(|_| skip_ingredient(b))
+                && skip_slot(b)
+                && {
+                    let _show_notification = b.bool();
+                    true
+                }
         }
         1 => {
             // crafting_shapeless : group, category, n ingrédients, résultat
