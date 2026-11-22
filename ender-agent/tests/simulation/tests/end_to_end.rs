@@ -16,5 +16,10 @@ async fn agent_recolte_du_bois_puis_craft_des_planks_en_autonomie() {
     );
     assert!(report.metrics.get("plans_generated").copied().unwrap_or(0) >= 1);
     assert!(report.metrics.get("skills_success").copied().unwrap_or(0) >= 2);
+    assert_eq!(
+        report.metrics.get("verify_mismatch").copied().unwrap_or(0),
+        0,
+        "chaque SUCCESS doit verifier l'objectif dans l'etat reel"
+    );
     assert!(report.buffer_len >= 1, "des experiences doivent etre enregistrees");
 }

@@ -20,10 +20,13 @@ pub trait MemoryStore: Send + Sync {
     fn append(&mut self, event: &MemoryEvent);
     fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEvent>;
     fn all(&self, limit: usize) -> Vec<MemoryEvent>;
+    fn save_episode(&mut self, episode: &Episode);
+    fn episodes(&self, limit: usize) -> Vec<Episode>;
 }
 
 pub struct InMemoryMemory {
     events: Vec<MemoryEvent>,
+    episodes: Vec<Episode>,
 }
 
 impl Default for InMemoryMemory {
@@ -34,7 +37,10 @@ impl Default for InMemoryMemory {
 
 impl InMemoryMemory {
     pub fn new() -> Self {
-        Self { events: Vec::new() }
+        Self {
+            events: Vec::new(),
+            episodes: Vec::new(),
+        }
     }
 }
 
@@ -60,6 +66,14 @@ impl MemoryStore for InMemoryMemory {
     fn all(&self, limit: usize) -> Vec<MemoryEvent> {
         self.events.iter().rev().take(limit).cloned().collect()
     }
+
+    fn save_episode(&mut self, episode: &Episode) {
+        self.episodes.push(episode.clone());
+    }
+
+    fn episodes(&self, limit: usize) -> Vec<Episode> {
+        self.episodes.iter().rev().take(limit).cloned().collect()
+    }
 }
 
 #[cfg(feature = "persist")]
@@ -80,7 +94,19 @@ impl SqliteMemory {
                 detail TEXT NOT NULL,
                 confidence REAL NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory_events(kind);",
+            CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory_events(kind);
+            CREATE TABLE IF NOT EXISTS episodes (
+                id INTEGER PRIMARY KEY,
+                started_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS episode_events (
+                episode_id INTEGER NOT NULL,
+                tick INTEGER NOT NULL,
+                wall_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                confidence REAL NOT NULL
+            );",
         )?;
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
@@ -92,6 +118,18 @@ impl SqliteMemory {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tick INTEGER NOT NULL,
+                wall_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                confidence REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS episodes (
+                id INTEGER PRIMARY KEY,
+                started_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS episode_events (
+                episode_id INTEGER NOT NULL,
                 tick INTEGER NOT NULL,
                 wall_ms INTEGER NOT NULL,
                 kind TEXT NOT NULL,
@@ -166,6 +204,70 @@ impl MemoryStore for SqliteMemory {
             .unwrap();
         rows.filter_map(|r| r.ok()).collect()
     }
+
+    fn save_episode(&mut self, episode: &Episode) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO episodes (id, started_ms) VALUES (?1, ?2)",
+            rusqlite::params![episode.id as i64, episode.started_ms as i64],
+        );
+        for ev in &episode.events {
+            let _ = conn.execute(
+                "INSERT INTO episode_events (episode_id, tick, wall_ms, kind, detail, confidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    episode.id as i64,
+                    ev.tick as i64,
+                    ev.wall_ms as i64,
+                    &ev.kind,
+                    &ev.detail,
+                    ev.confidence
+                ],
+            );
+        }
+    }
+
+    fn episodes(&self, limit: usize) -> Vec<Episode> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, started_ms FROM episodes ORDER BY id DESC LIMIT ?1")
+            .unwrap();
+        let ids = stmt
+            .query_map(rusqlite::params![limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u128))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for (id, started_ms) in ids {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT tick, wall_ms, kind, detail, confidence FROM episode_events
+                     WHERE episode_id = ?1 ORDER BY rowid",
+                )
+                .unwrap();
+            let events = stmt
+                .query_map(rusqlite::params![id as i64], |row| {
+                    Ok(MemoryEvent {
+                        tick: row.get::<_, i64>(0)? as u64,
+                        wall_ms: row.get::<_, i64>(1)? as u128,
+                        kind: row.get(2)?,
+                        detail: row.get(3)?,
+                        confidence: row.get(4)?,
+                    })
+                })
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            out.push(Episode {
+                id,
+                started_ms,
+                events,
+            });
+        }
+        out
+    }
 }
 
 pub struct Memory {
@@ -217,13 +319,23 @@ impl Memory {
     }
 
     pub fn close_episode(&mut self) {
-        self.current.id = self.next_episode;
+        let mut ep = Episode {
+            id: self.next_episode,
+            started_ms: self.current.started_ms,
+            events: std::mem::take(&mut self.current.events),
+        };
         self.next_episode += 1;
+        ep.id = self.next_episode - 1;
+        self.store.save_episode(&ep);
         self.current = Episode {
-            id: self.current.id,
+            id: 0,
             started_ms: now_ms(),
             events: Vec::new(),
         };
+    }
+
+    pub fn episodes(&self, limit: usize) -> Vec<Episode> {
+        self.store.episodes(limit)
     }
 
     pub fn current_episode(&self) -> &Episode {

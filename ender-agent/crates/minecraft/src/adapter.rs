@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(feature = "live")]
+use azalea::container::ContainerClientExt;
+#[cfg(feature = "live")]
 use azalea::ecs::component::Component;
 #[cfg(feature = "live")]
 use azalea::pathfinder::PathfinderClientExt;
@@ -47,6 +49,11 @@ pub trait MinecraftAdapter: Send + Sync {
     fn break_block(&self, pos: [i32; 3]) -> Result<(), AdapterError>;
     fn craft(&self, item: &str, count: u32) -> Result<(), AdapterError>;
     fn chat(&self, message: &str);
+
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        let _ = (kind, pos);
+        Err(AdapterError::Unsupported("spawn hostile".to_string()))
+    }
 }
 
 impl<T: MinecraftAdapter + ?Sized> MinecraftAdapter for Arc<T> {
@@ -82,6 +89,10 @@ impl<T: MinecraftAdapter + ?Sized> MinecraftAdapter for Arc<T> {
         (**self).break_block(pos)
     }
 
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        (**self).debug_spawn_hostile(kind, pos)
+    }
+
     fn craft(&self, item: &str, count: u32) -> Result<(), AdapterError> {
         (**self).craft(item, count)
     }
@@ -90,17 +101,6 @@ impl<T: MinecraftAdapter + ?Sized> MinecraftAdapter for Arc<T> {
         (**self).chat(message)
     }
 }
-
-const SIM_RECIPES: &[(&str, u32, &[(&str, u32)])] = &[
-    ("minecraft:oak_planks", 4, &[("minecraft:oak_log", 1)]),
-    ("minecraft:stick", 4, &[("minecraft:oak_planks", 2)]),
-    ("minecraft:crafting_table", 1, &[("minecraft:oak_planks", 4)]),
-    (
-        "minecraft:wooden_pickaxe",
-        1,
-        &[("minecraft:oak_planks", 3), ("minecraft:stick", 2)],
-    ),
-];
 
 enum Pending {
     Craft { item: String, count: u32, done_tick: u64 },
@@ -404,7 +404,7 @@ impl MinecraftAdapter for SimAdapter {
         if !sim.connected {
             return Err(AdapterError::NotConnected);
         }
-        let recipe = SIM_RECIPES
+        let recipe = crate::VANILLA_RECIPES
             .iter()
             .find(|(out, _, _)| *out == item)
             .ok_or_else(|| AdapterError::InvalidCommand(format!("recette inconnue: {item}")))?;
@@ -434,6 +434,23 @@ impl MinecraftAdapter for SimAdapter {
             sender: Some("sim-server".to_string()),
             content: message.to_string(),
         });
+    }
+
+    fn debug_spawn_hostile(&self, kind: &str, pos: [f64; 3]) -> Result<(), AdapterError> {
+        let mut sim = self.sim.lock().unwrap();
+        if !sim.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        let id = 100 + sim.entities.len() as i64;
+        let info = EntityInfo {
+            id,
+            kind: kind.to_string(),
+            pos,
+            hostile: true,
+        };
+        let _ = self.events_tx.send(GameEvent::EntitySpawned(info.clone()));
+        sim.entities.push(info);
+        Ok(())
     }
 }
 
@@ -513,6 +530,12 @@ async fn handle(
 struct NearGoal {
     target: [i32; 3],
     radius: i32,
+}
+
+#[cfg(feature = "live")]
+fn live_block_name(state: azalea::blocks::BlockState) -> String {
+    let b: Box<dyn azalea::blocks::Block> = state.into();
+    crate::normalize_id(&b.as_registry_block().to_string())
 }
 
 #[cfg(feature = "live")]
@@ -625,11 +648,28 @@ impl MinecraftAdapter for AzaleaAdapter {
                 for dz in -4..=4 {
                     let p = azalea::BlockPos::new(center.x + dx, center.y + dy, center.z + dz);
                     if let Some(state) = world.get_block_state(&p) {
-                        nearby_blocks.push(([p.x, p.y, p.z], format!("{:?}", state)));
+                        nearby_blocks.push(([p.x, p.y, p.z], live_block_name(state)));
                     }
                 }
             }
         }
+        drop(world);
+        let entities = {
+            let mut ecs = bot.ecs.lock();
+            let world = &mut *ecs;
+            let mut query =
+                world.query::<(azalea::ecs::entity::Entity, &azalea::entity::Position, &azalea::entity::EntityKind)>();
+            query
+                .iter(&*world)
+                .filter(|(e, _, _)| *e != bot.entity)
+                .map(|(e, position, kind)| EntityInfo {
+                    id: e.index() as i64,
+                    kind: crate::normalize_id(&kind.0.to_string()),
+                    pos: [position.x, position.y, position.z],
+                    hostile: false,
+                })
+                .collect()
+        };
         Ok(PlayerSnapshot {
             tick: 0,
             position: [pos.x, pos.y, pos.z],
@@ -637,7 +677,7 @@ impl MinecraftAdapter for AzaleaAdapter {
             health,
             hunger,
             inventory,
-            entities: Vec::new(),
+            entities,
             nearby_blocks,
         })
     }
@@ -661,10 +701,57 @@ impl MinecraftAdapter for AzaleaAdapter {
         Ok(())
     }
 
-    fn craft(&self, item: &str, _count: u32) -> Result<(), AdapterError> {
-        Err(AdapterError::Unsupported(format!(
-            "fabrication live '{item}' via clics d'inventaire: phase 4"
-        )))
+    fn craft(&self, item: &str, count: u32) -> Result<(), AdapterError> {
+        use azalea_inventory::operations::{ClickOperation, PickupClick, QuickMoveClick};
+        use azalea_inventory::ItemSlot;
+        let item = crate::normalize_id(item);
+        let recipe = crate::VANILLA_RECIPES
+            .iter()
+            .find(|(out, _, _)| *out == item)
+            .ok_or_else(|| AdapterError::InvalidCommand(format!("recette inconnue: {item}")))?;
+        let out_count = recipe.1;
+        let inputs: &[(&str, u32)] = recipe.2;
+        let crafts = count.div_ceil(out_count);
+        let mut guard = self.link.client.lock().unwrap();
+        let bot = guard.as_mut().ok_or(AdapterError::NotConnected)?;
+        let handle = bot
+            .open_inventory()
+            .ok_or_else(|| AdapterError::Unsupported("un conteneur est deja ouvert".to_string()))?;
+        for _ in 0..crafts {
+            for (i, (input, n)) in inputs.iter().enumerate() {
+                let grid_slot = 1 + i as u16;
+                let menu = handle
+                    .menu()
+                    .ok_or_else(|| AdapterError::Unsupported("menu indisponible".to_string()))?;
+                let src = (9..=45u16).find(|&s| {
+                    menu.slots().get(s as usize).map_or(false, |slot| {
+                        matches!(slot, ItemSlot::Present(d)
+                            if crate::normalize_id(&d.kind.to_string()) == *input)
+                    })
+                });
+                let src = src.ok_or_else(|| {
+                    AdapterError::InvalidCommand(format!("materiau absent: {input}"))
+                })?;
+                handle.click(ClickOperation::Pickup(PickupClick::Left {
+                    slot: Some(src),
+                }));
+                for _ in 0..*n {
+                    handle.click(ClickOperation::Pickup(PickupClick::Right {
+                        slot: Some(grid_slot),
+                    }));
+                }
+                let carried_empty = bot
+                    .get_component::<azalea::inventory::Inventory>()
+                    .map_or(true, |inv| inv.carried.is_empty());
+                if !carried_empty {
+                    handle.click(ClickOperation::Pickup(PickupClick::Left {
+                        slot: Some(src),
+                    }));
+                }
+            }
+            handle.click(ClickOperation::QuickMove(QuickMoveClick::Left { slot: 0 }));
+        }
+        Ok(())
     }
 
     fn chat(&self, message: &str) {

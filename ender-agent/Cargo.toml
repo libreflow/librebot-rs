@@ -28,6 +28,7 @@ tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
 petgraph = "=0.6.5"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 azalea = "=0.10.3+mc1.21.1"
+azalea-inventory = "=0.10.3+mc1.21.1"
 bevy_ecs = "=0.13.2"
 
 ender-minecraft = { path = "crates/minecraft" }

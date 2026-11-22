@@ -57,7 +57,7 @@ Variables d'environnement : `ENDER_MODE` (sim|live), `ENDER_SERVER`, `ENDER_USER
 
 ## Phases de développement
 
-Ce socle couvre la **phase 1** (infrastructure, client, événements, premier moteur cognitif) et pose les interfaces des phases 2–10 : perception riche (phase 2), pathfinding Azalea avancé (phase 3), skills vérifiés (phase 4), GOAP complet (phase 5), BT avec interruptions (phase 6), mémoire persistante (phase 7), graphe de progression (phase 8), RL sur sous-problèmes (phase 9), benchmarks bout-en-bout (phase 10).
+Ce socle couvre la **phase 1** (infrastructure, client, événements, premier moteur cognitif) et pose les interfaces des phases 2–10. Quick wins déjà câblés : graphe de progression (`ProgressionGraph`) branché dans la boucle de décision, épisodes persistés en SQLite, étape **Verify** après chaque skill (métrique `verify_mismatch`), fallback piloté par la politique RL (`TabularPolicy::select`), suite de benchmarks testée de bout en bout (`tests/simulation/tests/benchmarks.rs`). Reste : perception live riche (noms de blocs, entités), craft live Azalea, `SimEnvironment` RL complet, replan GOAP avec vérification d'effets, `candle` (phase 9).
 
 ## Limites connues du socle
 

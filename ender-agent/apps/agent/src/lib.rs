@@ -7,12 +7,14 @@ use std::time::Duration;
 use anyhow::Context as _;
 use ender_behavior::{Action as BtAction, BehaviorTree, Check, Selector, Sequence, Status as BtStatus};
 use ender_evaluation::{DecisionLog, Metrics};
-use ender_learning::{observe, Reward, Step, Trainer};
+use ender_learning::{observe, Action as RlAction, Policy, Reward, Step, Trainer};
 use ender_minecraft::{Client, GameEvent, MinecraftAdapter, SimAdapter};
 #[cfg(feature = "live")]
 use ender_minecraft::AzaleaAdapter;
 use ender_perception::{BlockPos, Perception, Value, WorldState};
-use ender_planner::{select_goal, ActionDefinition, Condition, Goal, GoapPlanner, StateMap};
+use ender_planner::{
+    select_goal, ActionDefinition, Condition, Goal, GoapPlanner, ProgressionGraph, StateMap,
+};
 use ender_skills::{Skill, SkillContext, SkillLibrary, SkillParams, SkillStatus};
 use ender_world_model::WorldModel;
 
@@ -81,6 +83,44 @@ pub fn skill_params_for(action: &str, smap: &StateMap, center: [i32; 3]) -> Opti
     }
 }
 
+fn enrich_state_map(smap: &mut StateMap, model: &WorldModel) {
+    let chunks = model.map.explored_chunks();
+    smap.insert("explored_chunks".to_string(), Value::from(chunks));
+    smap.insert("explored".to_string(), Value::Bool(chunks > 0));
+}
+
+fn rl_action_to_params(action: RlAction, smap: &StateMap, center: [i32; 3]) -> SkillParams {
+    match action {
+        RlAction::GatherWood => match smap
+            .get("nearest_log_pos")
+            .and_then(Value::as_str)
+            .and_then(parse_pos)
+        {
+            Some(pos) => SkillParams::Gather {
+                pos,
+                drop: "minecraft:oak_log".to_string(),
+            },
+            None => SkillParams::Explore { center, radius: 16 },
+        },
+        RlAction::CraftPlanks => {
+            if smap
+                .get("has_item:minecraft:oak_log")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                SkillParams::Craft {
+                    item: "minecraft:oak_planks".to_string(),
+                    count: 4,
+                }
+            } else {
+                SkillParams::Explore { center, radius: 16 }
+            }
+        }
+        RlAction::Flee => SkillParams::Flee,
+        _ => SkillParams::Explore { center, radius: 16 },
+    }
+}
+
 fn skill_name(params: &SkillParams) -> &'static str {
     match params {
         SkillParams::MoveTo { .. } => "move_to",
@@ -130,6 +170,7 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
     let metrics = Arc::new(Mutex::new(Metrics::new()));
     let log = Arc::new(Mutex::new(DecisionLog::new(500)));
     let trainer = Arc::new(Mutex::new(Trainer::new(10_000, 0.1)));
+    let last_goal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     {
         let mut rx = adapter.events();
@@ -200,11 +241,19 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
         let active_skill = Arc::clone(&active_skill);
         let metrics = Arc::clone(&metrics);
         let log = Arc::clone(&log);
+        let trainer = Arc::clone(&trainer);
+        let last_goal = Arc::clone(&last_goal);
         let planner = GoapPlanner::new(default_actions());
         let goals = default_goals();
         let library = SkillLibrary::standard();
         let interval = Duration::from_millis(config.decision_interval_ms);
         tokio::spawn(async move {
+            let mut graph = ProgressionGraph::new();
+            graph.add_goal("survivre", 10.0);
+            graph.add_goal("obtenir_du_bois", 5.0);
+            graph.add_goal("fabriquer_des_planks", 4.0);
+            graph.add_dependency("obtenir_du_bois", "fabriquer_des_planks");
+            graph.add_goal("explorer", 1.0);
             let mut reactive = BehaviorTree::new(Box::new(Selector::new(vec![
                 Box::new(Sequence::new(vec![
                     Box::new(Check::new(|bb| bb.get_bool("hostile_nearby"))),
@@ -227,10 +276,7 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
                 tokio::time::sleep(interval).await;
                 let state = perception.read().unwrap().state().clone();
                 let mut smap = state.to_state_map();
-                smap.insert(
-                    "explored_chunks".to_string(),
-                    Value::from(model.lock().unwrap().map.explored_chunks()),
-                );
+                enrich_state_map(&mut smap, &model.lock().unwrap());
                 log.lock().unwrap().observation(&format!(
                     "pos=({:.1},{:.1},{:.1}) vie={:.0} faim={:.0} blocs_vus={} entites={}",
                     state.position[0],
@@ -274,9 +320,11 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
                 if active_skill.lock().unwrap().is_some() {
                     continue;
                 }
-                match select_goal(&goals, &smap) {
+                let avail: Vec<Goal> = graph.available(&goals, &smap).into_iter().cloned().collect();
+                match select_goal(&avail, &smap) {
                     Some(goal) => {
                         log.lock().unwrap().goal(&format!("{} (priorite {:.1})", goal.name, goal.priority));
+                        *last_goal.lock().unwrap() = Some(goal.name.clone());
                         match planner.plan(&smap, &goal.conditions) {
                             Some(plan) if !plan.is_empty() => {
                                 metrics.lock().unwrap().inc("plans_generated");
@@ -310,17 +358,23 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
                             }
                             None => {
                                 metrics.lock().unwrap().inc("plans_impossible");
-                                log.lock().unwrap().plan("aucun plan executable, repli exploration");
+                                let rl_action = {
+                                    let mut t = trainer.lock().unwrap();
+                                    t.policy.select(observe(&state).key())
+                                };
+                                log.lock().unwrap().plan(&format!(
+                                    "aucun plan executable, fallback politique RL ({rl_action:?})"
+                                ));
                                 let center = [
                                     state.position[0].floor() as i32,
                                     state.position[1].floor() as i32,
                                     state.position[2].floor() as i32,
                                 ];
+                                let params = rl_action_to_params(rl_action, &smap, center);
+                                let name = skill_name(&params);
                                 let model_guard = model.lock().unwrap();
                                 let ctx = SkillContext { state: &state, adapter: &*adapter, knowledge: &model_guard.knowledge };
-                                if let Some(mut skill) =
-                                    library.instantiate("explore", SkillParams::Explore { center, radius: 16 })
-                                {
+                                if let Some(mut skill) = library.instantiate(name, params) {
                                     skill.start(&ctx);
                                     *active_skill.lock().unwrap() = Some(skill);
                                 }
@@ -344,6 +398,8 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
         let metrics = Arc::clone(&metrics);
         let log = Arc::clone(&log);
         let trainer = Arc::clone(&trainer);
+        let last_goal = Arc::clone(&last_goal);
+        let goals = default_goals();
         let interval = Duration::from_millis(config.skill_tick_ms);
         tokio::spawn(async move {
             let mut completions = 0u64;
@@ -371,6 +427,19 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
                     SkillStatus::Success => {
                         log.lock().unwrap().execution(&format!("{name} -> SUCCESS (verifie dans l'etat reel)"));
                         metrics.lock().unwrap().inc("skills_success");
+                        let goal_name = last_goal.lock().unwrap().clone();
+                        if let Some(gn) = goal_name {
+                            let mut smap2 = state.to_state_map();
+                            enrich_state_map(&mut smap2, &model.lock().unwrap());
+                            if let Some(g) = goals.iter().find(|g| g.name == gn) {
+                                if !g.is_satisfied(&smap2) {
+                                    metrics.lock().unwrap().inc("verify_mismatch");
+                                    log.lock().unwrap().execution(&format!(
+                                        "VERIFY: objectif '{gn}' non satisfait apres SUCCESS, replan necessaire"
+                                    ));
+                                }
+                            }
+                        }
                         let obs = observe(&state);
                         trainer.lock().unwrap().record(Step {
                             obs_key: obs.key(),
@@ -424,6 +493,7 @@ pub async fn run(config: Config) -> anyhow::Result<AgentReport> {
         tokio::signal::ctrl_c().await.context("ctrl-c")?;
     }
     adapter.disconnect();
+    model.lock().unwrap().memory.close_episode();
     let final_state = perception.read().unwrap().state().clone();
     let report_metrics = metrics.lock().unwrap().snapshot();
     let decisions = log.lock().unwrap().render();

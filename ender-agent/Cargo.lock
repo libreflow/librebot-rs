@@ -1010,6 +1010,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "azalea",
+ "azalea-inventory",
  "bevy_ecs",
  "serde",
  "thiserror 2.0.3",
@@ -1061,7 +1062,9 @@ name = "ender-tests-simulation"
 version = "0.1.0"
 dependencies = [
  "ender-agent",
+ "ender-evaluation",
  "ender-minecraft",
+ "ender-world-model",
  "tokio",
 ]
 
