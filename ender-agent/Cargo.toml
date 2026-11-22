@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/minecraft",
+    "crates/perception",
+    "crates/world_model",
+    "crates/planner",
+    "crates/behavior",
+    "crates/skills",
+    "crates/learning",
+    "crates/evaluation",
+    "apps/agent",
+    "tests/integration",
+    "tests/simulation",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "=1.41.1", features = ["full"] }
+serde = { version = "=1.0.210", features = ["derive"] }
+anyhow = "=1.0.89"
+thiserror = "=2.0.3"
+tracing = "=0.1.40"
+tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
+petgraph = "=0.6.5"
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+azalea = "=0.10.3+mc1.21.1"
+bevy_ecs = "=0.13.2"
+
+ender-minecraft = { path = "crates/minecraft" }
+ender-perception = { path = "crates/perception" }
+ender-world-model = { path = "crates/world_model" }
+ender-planner = { path = "crates/planner" }
+ender-behavior = { path = "crates/behavior" }
+ender-skills = { path = "crates/skills" }
+ender-learning = { path = "crates/learning" }
+ender-evaluation = { path = "crates/evaluation" }
+
