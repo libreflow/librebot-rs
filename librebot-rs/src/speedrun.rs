@@ -3,6 +3,7 @@
 //! une phase en incident rend un `Step` (Retry / PlanB / Abort), jamais un unwrap.
 
 use crate::bot::Bot;
+use crate::entities;
 use crate::runlog::{RunEvent, RunLogger};
 use std::time::Duration;
 
@@ -186,7 +187,8 @@ async fn dispatch(bot: &mut Bot, sr: &mut Speedrun) -> Step {
     match sr.phase {
         Phase::Spawn => phase_spawn(bot, &mut sr.logger).await,
         Phase::NetherEntry => phase_nether_entry(bot, &mut sr.logger).await,
-        Phase::Bastion | Phase::Fortress | Phase::Stronghold | Phase::End => phase_stub(sr).await,
+        Phase::Bastion => phase_bastion(bot, &mut sr.logger).await,
+        Phase::Fortress | Phase::Stronghold | Phase::End => phase_stub(sr).await,
     }
 }
 
@@ -233,24 +235,14 @@ async fn phase_spawn(bot: &mut Bot, logger: &mut RunLogger) -> Step {
 async fn phase_nether_entry(bot: &mut Bot, logger: &mut RunLogger) -> Step {
     let mut portal = None;
     let mut radius = 32;
-    for tries in 0..4 {
+    for tries in 0..4u32 {
         if let Some(p) = bot.find_block_any(&["nether_portal"], radius) {
             portal = Some(p);
             break;
         }
-        // Exploration déterministe pour charger de nouveaux chunks.
-        if let Some(p) = bot.pos {
-            let angle = (tries as f64) * 2.4;
-            let tx = (p[0] + angle.cos() * 40.0) as i32;
-            let tz = (p[2] + angle.sin() * 40.0) as i32;
-            let y = p[1] as i32;
-            if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, y) {
-                bot.goto(gx, gy, gz).await;
-                pump(bot, 400).await; // ~20 s de trajet
-                if bot.dead {
-                    return Step::Retry;
-                }
-            }
+        explore(bot, tries).await;
+        if bot.dead {
+            return Step::Retry;
         }
         radius += 32;
     }
@@ -283,6 +275,259 @@ async fn phase_nether_entry(bot: &mut Bot, logger: &mut RunLogger) -> Step {
         detail: format!("dimension={:?}", bot.dimension),
     });
     Step::Retry
+}
+
+/// Exploration déterministe (aucun aléatoire) pour charger de nouveaux chunks :
+/// déplacement de 40 blocs selon un angle fixé par `tries`.
+async fn explore(bot: &mut Bot, tries: u32) {
+    if let Some(p) = bot.pos {
+        let angle = (tries as f64) * 2.4;
+        let tx = (p[0] + angle.cos() * 40.0) as i32;
+        let tz = (p[2] + angle.sin() * 40.0) as i32;
+        let y = p[1] as i32;
+        if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, y) {
+            bot.goto(gx, gy, gz).await;
+            pump(bot, 400).await; // ~20 s de trajet
+        }
+    }
+}
+
+/// Blocs marqueurs d'un bastion (route.md §1).
+const BASTION_MARKERS: &[&str] = &["gilded_blackstone", "blackstone"];
+/// Blocs conteneurs lootables dans un bastion.
+const CHEST_BLOCKS: &[&str] = &["chest", "barrel"];
+/// Contrat route.md : sortie du Nether avec >= 8 perles, sinon plan B mini-yeux.
+const PEARLS_TARGET: i32 = 8;
+const MAX_CHESTS: u32 = 12;
+const MAX_BARTERS: u32 = 40;
+
+/// Règle d'abandon d'un bastion pauvre (route.md §1) : 0 perle après avoir vidé
+/// les coffres centraux (>= 3) ou tenté >= 10 barters.
+fn bastion_verdict(pearls: i32, chests_looted: u32, barters: u32) -> bool {
+    pearls <= 0 && (chests_looted >= 3 || barters >= 10)
+}
+
+/// Phase 3 `Bastion` (route.md §1) : localiser un bastion (gilded_blackstone),
+/// vider ses coffres, barter les piglins pour les perles. Split `bastion_done`.
+/// Réactions adaptatives : abandon d'un bastion pauvre (PlanB), arrêt anticipé
+/// dès que PEARLS_TARGET est atteint.
+async fn phase_bastion(bot: &mut Bot, logger: &mut RunLogger) -> Step {
+    if bot.dimension.as_deref() != Some("minecraft:the_nether") {
+        logger.event(RunEvent::Custom {
+            kind: "bastion_dim".into(),
+            detail: format!("dimension={:?}", bot.dimension),
+        });
+        return Step::Retry;
+    }
+    // 1. Localiser un bastion.
+    let mut spot = None;
+    for tries in 0..4u32 {
+        if let Some(p) = bot.find_block_any(BASTION_MARKERS, 48 + tries as i32 * 32) {
+            spot = Some(p);
+            break;
+        }
+        explore(bot, tries).await;
+        if bot.dead {
+            return Step::Retry;
+        }
+    }
+    let Some((bx, by, bz)) = spot else {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::Bastion.name(),
+            reason: "aucun bastion détecté → forteresse directement".into(),
+        });
+        logger.split("bastion_done");
+        return Step::Next;
+    };
+    logger.event(RunEvent::Custom {
+        kind: "bastion_found".into(),
+        detail: format!("{bx},{by},{bz}"),
+    });
+    if let Some((gx, gy, gz)) = bot.find_walkable_near(bx, bz, by) {
+        bot.goto(gx, gy, gz).await;
+        pump(bot, 600).await;
+    }
+    // 2. Loot des coffres.
+    let mut chests_looted = 0u32;
+    for _ in 0..MAX_CHESTS {
+        if bot.dead {
+            return Step::Retry;
+        }
+        if bot.count_item("ender_pearl") >= PEARLS_TARGET {
+            break;
+        }
+        let Some((cx, cy, cz)) = bot.find_block_any(CHEST_BLOCKS, 24) else {
+            break;
+        };
+        if loot_chest(bot, cx, cy, cz).await {
+            chests_looted += 1;
+        }
+        if bastion_verdict(bot.count_item("ender_pearl"), chests_looted, 0) {
+            logger.event(RunEvent::PlanB {
+                phase: Phase::Bastion.name(),
+                reason: format!(
+                    "bastion pauvre : {chests_looted} coffres vidés, 0 perle → on l'abandonne"
+                ),
+            });
+            break;
+        }
+    }
+    // 3. Barter avec les piglins (or en main + interact).
+    let mut barters = 0u32;
+    while barters < MAX_BARTERS && bot.count_item("ender_pearl") < PEARLS_TARGET {
+        if bot.dead {
+            return Step::Retry;
+        }
+        if bot.count_item("gold_ingot") <= 0 {
+            break;
+        }
+        let Some(p) = bot.pos else { break };
+        let Some((pid, _)) = bot
+            .entities
+            .nearest_kind(entities::PIGLIN_ENTITY_TYPE, p, 24.0)
+        else {
+            break;
+        };
+        let before = bot.count_item("ender_pearl");
+        barter_once(bot, pid).await;
+        let gained = (bot.count_item("ender_pearl") - before).max(0) as u32;
+        barters += 1;
+        logger.event(RunEvent::Barter { pearls: gained });
+        if bastion_verdict(bot.count_item("ender_pearl"), chests_looted, barters) {
+            break;
+        }
+    }
+    let pearls = bot.count_item("ender_pearl");
+    logger.event(RunEvent::Custom {
+        kind: "bastion_loot".into(),
+        detail: format!("perles={pearls} coffres={chests_looted} barters={barters}"),
+    });
+    if pearls < PEARLS_TARGET {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::Bastion.name(),
+            reason: format!(
+                "perles={pearls} < {PEARLS_TARGET} → plan B mini-yeux à la sortie du Nether"
+            ),
+        });
+    }
+    logger.split("bastion_done");
+    Step::Next
+}
+
+/// Ouvre un coffre/baril et vide son contenu dans l'inventaire. Retourne true
+/// si la fenêtre a été ouverte.
+async fn loot_chest(bot: &mut Bot, x: i32, y: i32, z: i32) -> bool {
+    // Se rapprocher à portée d'interaction (~4,5 blocs).
+    if let Some(p) = bot.pos {
+        let d = ((p[0] - (x as f64 + 0.5)).powi(2) + (p[2] - (z as f64 + 0.5)).powi(2)).sqrt();
+        if d > 4.0 {
+            if let Some((gx, gy, gz)) = bot.find_walkable_near(x, z, y) {
+                bot.goto(gx, gy, gz).await;
+                for _ in 0..400 {
+                    if bot.path_len() == 0 {
+                        break;
+                    }
+                    pump(bot, 1).await;
+                }
+            }
+        }
+    }
+    // use_item_on (BLOCK_PLACE) sur le dessus du coffre, comme pour la table.
+    if bot.place(x, y, z, 1).await.is_err() {
+        return false;
+    }
+    let mut opened = false;
+    for _ in 0..100 {
+        pump(bot, 1).await;
+        if bot.open_window_id.is_some() {
+            opened = true;
+            break;
+        }
+        if bot.dead {
+            return false;
+        }
+    }
+    if !opened {
+        return false;
+    }
+    let Some((win, n)) = bot.inventory.container_slots() else {
+        return false;
+    };
+    // Vider le conteneur : pickup de chaque slot, pose dans un slot joueur libre.
+    // Mapping fenêtre conteneur : slots externes n..n+36 = joueur (internal 9..=45).
+    for e in 0..n.min(54) {
+        if bot.dead {
+            break;
+        }
+        let carried = bot.inventory.carried.as_ref().map(|s| (s.id, s.count));
+        if bot
+            .click_window_carried(win, e as i16, 0, 0, carried)
+            .await
+            .is_err()
+        {
+            break;
+        }
+        for _ in 0..6 {
+            pump(bot, 1).await;
+        }
+        if let Some(c) = bot.inventory.carried.clone() {
+            let free = (9..=44).find(|&f| {
+                bot.inventory
+                    .slots
+                    .get(f)
+                    .map(|s| s.is_none())
+                    .unwrap_or(true)
+            });
+            if let Some(f) = free {
+                let ext = (f - 9 + n) as i16;
+                let _ = bot
+                    .click_window_carried(win, ext, 0, 0, Some((c.id, c.count)))
+                    .await;
+                for _ in 0..6 {
+                    pump(bot, 1).await;
+                }
+            }
+        }
+    }
+    let _ = bot.close_container().await;
+    true
+}
+
+/// Un barter : approcher le piglin, mettre un lingot d'or en main, interact,
+/// puis ramasser les drops.
+async fn barter_once(bot: &mut Bot, piglin: i32) {
+    if let (Some(p), Some(e)) = (bot.pos, bot.entities.get(piglin)) {
+        let ep = e.pos;
+        let d = ((p[0] - ep[0]).powi(2) + (p[2] - ep[2]).powi(2)).sqrt();
+        if d > 3.5 {
+            let (tx, tz) = (ep[0] as i32, ep[2] as i32);
+            if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, ep[1] as i32) {
+                bot.goto(gx, gy, gz).await;
+                for _ in 0..300 {
+                    if bot.path_len() == 0 {
+                        break;
+                    }
+                    pump(bot, 1).await;
+                    if bot.dead {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let gold = crate::recipes::item_id("gold_ingot");
+    let _ = bot.select_hotbar_by_item(gold).await;
+    if bot.interact_entity(piglin, false).await.is_err() {
+        return;
+    }
+    // Attendre le résultat du barter puis ramasser les drops.
+    for _ in 0..60 {
+        pump(bot, 1).await;
+        if bot.dead {
+            return;
+        }
+    }
+    let _ = bot.collect_drops(6.0).await;
 }
 
 /// Phases pas encore implémentées (une par itération) : abandon propre, loggé.
@@ -328,6 +573,19 @@ mod tests {
         assert!(sr.transition(Step::Retry));
         assert!(sr.transition(Step::Retry));
         assert!(!sr.transition(Step::Retry)); // MAX_RETRIES épuisés
+    }
+
+    #[test]
+    fn regle_abandon_bastion_pauvre() {
+        // 0 perle après 3+ coffres vidés -> abandon
+        assert!(bastion_verdict(0, 3, 0));
+        // 0 perle après 10+ barters -> abandon
+        assert!(bastion_verdict(0, 0, 10));
+        // des perles obtenues -> on garde le bastion
+        assert!(!bastion_verdict(2, 5, 0));
+        // peu de coffres vidés et 0 perle -> on continue à looter
+        assert!(!bastion_verdict(0, 1, 0));
+        assert!(!bastion_verdict(0, 0, 3));
     }
 
     #[test]

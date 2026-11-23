@@ -122,6 +122,11 @@ impl Inventory {
     }
 
     /// Slot interne contenant l'item donné (hotbar en priorité, puis stockage).
+    /// Dernière fenêtre conteneur lue : (window_id, nombre de slots conteneur).
+    pub fn container_slots(&self) -> Option<(u8, usize)> {
+        self.last_container
+    }
+
     pub fn find(&self, item_id: i32) -> Option<usize> {
         let hotbar = (HOTBAR_FIRST..=HOTBAR_LAST).filter(|&i| i < self.slots.len());
         let storage = (STORAGE_FIRST..HOTBAR_FIRST).filter(|&i| i < self.slots.len());

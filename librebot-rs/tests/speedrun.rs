@@ -73,3 +73,62 @@ async fn portail_ruine_detecte_et_dimension_nether_lue() {
 
     server.await.unwrap();
 }
+
+/// Barter : un piglin spawné est détecté (kind 78) et `interact_entity` envoie
+/// bien Use Entity (0x16, action interact) puis Swing (0x36).
+#[tokio::test]
+async fn barter_piglin_use_entity_016() {
+    use librebot_rs::entities::PIGLIN_ENTITY_TYPE;
+
+    let (listener, addr) = free_listener().await;
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x27, &floor_chunk_body(0, 0, None))
+            .await
+            .unwrap();
+        conn.send(0x40, &position_body(1.5, (MIN_Y + 1) as f64, 1.5, 1))
+            .await
+            .unwrap();
+        let confirm = expect(&mut conn, 0x00).await; // teleport_confirm
+        assert_eq!(librebot_rs::protocol::Body(&confirm).varint(), 1);
+        // Piglin (kind 78) à 3 blocs.
+        conn.send(
+            0x01,
+            &spawn_entity_body(42, PIGLIN_ENTITY_TYPE, 4.5, (MIN_Y + 1) as f64, 1.5),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Le bot doit envoyer use_entity (0x16) puis swing (0x36).
+        let body = expect(&mut conn, 0x16).await;
+        let mut b = librebot_rs::protocol::Body(&body);
+        assert_eq!(b.varint(), 42, "target entity");
+        assert_eq!(b.varint(), 0, "action interact (barter)");
+        assert_eq!(b.varint(), 0, "main hand");
+        assert_eq!(b.u8(), 0, "sneaking");
+        let _swing = expect(&mut conn, 0x36).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    loop {
+        match timeout(Duration::from_secs(5), bot.play_turn()).await {
+            Ok(Ok(Event::Connected)) => {}
+            Ok(Ok(Event::Spawned)) => break,
+            Ok(Ok(_)) => {}
+            _ => panic!("attendu Connected/Spawned"),
+        }
+    }
+    bot.drain_packets().await; // spawn_entity du piglin
+    let (pid, _) = bot
+        .entities
+        .nearest_kind(PIGLIN_ENTITY_TYPE, bot.pos.unwrap_or([0.0; 3]), 24.0)
+        .expect("piglin non détecté");
+    assert_eq!(pid, 42);
+    bot.interact_entity(pid, false).await.unwrap();
+
+    server.await.unwrap();
+}

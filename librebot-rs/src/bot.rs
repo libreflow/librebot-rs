@@ -722,6 +722,29 @@ impl Bot {
         Ok(state)
     }
 
+    /// Use Entity (0x16, 767) : action 0 = interact (ex. barter avec un piglin
+    /// en tenant un lingot d'or), 1 = attack. Envoie aussi un swing.
+    pub async fn interact_entity(&mut self, target: i32, attack: bool) -> std::io::Result<()> {
+        let mut b = Vec::new();
+        crate::protocol::write_varint(target, &mut b);
+        crate::protocol::write_varint(if attack { 1 } else { 0 }, &mut b);
+        crate::protocol::write_varint(0, &mut b); // main hand
+        b.push(0); // sneaking
+        self.conn.send(ids::play_s::USE_ENTITY, &b).await?;
+        let mut s = Vec::new();
+        crate::protocol::write_varint(0, &mut s); // main hand
+        self.conn.send(ids::play_s::SWING, &s).await
+    }
+
+    /// Ferme la fenêtre ouverte (container_close 0x0f).
+    pub async fn close_container(&mut self) -> std::io::Result<()> {
+        if let Some(w) = self.open_window_id {
+            self.conn.send(ids::play_s::CONTAINER_CLOSE, &[w]).await?;
+            self.open_window_id = None;
+        }
+        Ok(())
+    }
+
     /// Le minage en cours est-il terminé ?
     pub fn mining_done(&self) -> bool {
         self.mining.is_none()
