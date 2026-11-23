@@ -132,3 +132,57 @@ async fn barter_piglin_use_entity_016() {
 
     server.await.unwrap();
 }
+
+/// Combat : un blaze spawné (kind 8) est détecté et `interact_entity(.., true)`
+/// envoie Use Entity (0x16) avec action attack = 1.
+#[tokio::test]
+async fn combat_blaze_use_entity_attack() {
+    use librebot_rs::entities::BLAZE_ENTITY_TYPE;
+
+    let (listener, addr) = free_listener().await;
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x27, &floor_chunk_body(0, 0, None))
+            .await
+            .unwrap();
+        conn.send(0x40, &position_body(1.5, (MIN_Y + 1) as f64, 1.5, 1))
+            .await
+            .unwrap();
+        let _ = expect(&mut conn, 0x00).await; // teleport_confirm
+        conn.send(
+            0x01,
+            &spawn_entity_body(77, BLAZE_ENTITY_TYPE, 3.5, (MIN_Y + 1) as f64, 1.5),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let body = expect(&mut conn, 0x16).await;
+        let mut b = librebot_rs::protocol::Body(&body);
+        assert_eq!(b.varint(), 77, "target blaze");
+        assert_eq!(b.varint(), 1, "action attack");
+        let _swing = expect(&mut conn, 0x36).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    loop {
+        match timeout(Duration::from_secs(5), bot.play_turn()).await {
+            Ok(Ok(Event::Connected)) => {}
+            Ok(Ok(Event::Spawned)) => break,
+            Ok(Ok(_)) => {}
+            _ => panic!("attendu Connected/Spawned"),
+        }
+    }
+    bot.drain_packets().await;
+    let (bid, _) = bot
+        .entities
+        .nearest_kind(BLAZE_ENTITY_TYPE, bot.pos.unwrap_or([0.0; 3]), 24.0)
+        .expect("blaze non détecté");
+    assert_eq!(bid, 77);
+    bot.interact_entity(bid, true).await.unwrap();
+
+    server.await.unwrap();
+}

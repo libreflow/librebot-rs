@@ -188,7 +188,8 @@ async fn dispatch(bot: &mut Bot, sr: &mut Speedrun) -> Step {
         Phase::Spawn => phase_spawn(bot, &mut sr.logger).await,
         Phase::NetherEntry => phase_nether_entry(bot, &mut sr.logger).await,
         Phase::Bastion => phase_bastion(bot, &mut sr.logger).await,
-        Phase::Fortress | Phase::Stronghold | Phase::End => phase_stub(sr).await,
+        Phase::Fortress => phase_fortress(bot, &mut sr.logger).await,
+        Phase::Stronghold | Phase::End => phase_stub(sr).await,
     }
 }
 
@@ -528,6 +529,174 @@ async fn barter_once(bot: &mut Bot, piglin: i32) {
         }
     }
     let _ = bot.collect_drops(6.0).await;
+}
+
+/// Blocs marqueurs d'une forteresse du Nether.
+const FORTRESS_MARKERS: &[&str] = &["nether_bricks", "nether_brick_fence", "nether_brick_stairs"];
+/// Contrat route.md : 12 yeux = 12 poudres de blaze = 6 bâtons minimum (objectif 10+).
+const RODS_MIN: i32 = 6;
+const RODS_TARGET: i32 = 10;
+
+/// Phase 4 `Fortress` (route.md §1) : localiser une forteresse (nether_bricks),
+/// tuer des blazes (attack 0x16) et ramasser les blaze rods. Split `fortress_done`.
+/// Incidents : ghast proche → retraite (pas d'arc), mort → Retry (checkpoint).
+async fn phase_fortress(bot: &mut Bot, logger: &mut RunLogger) -> Step {
+    if bot.dimension.as_deref() != Some("minecraft:the_nether") {
+        return Step::Retry;
+    }
+    // 1. Localiser une forteresse.
+    let mut spot = None;
+    for tries in 0..4u32 {
+        if let Some(p) = bot.find_block_any(FORTRESS_MARKERS, 48 + tries as i32 * 32) {
+            spot = Some(p);
+            break;
+        }
+        explore(bot, tries).await;
+        if bot.dead {
+            return Step::Retry;
+        }
+    }
+    match spot {
+        Some((fx, fy, fz)) => {
+            logger.event(RunEvent::Custom {
+                kind: "fortress_found".into(),
+                detail: format!("{fx},{fy},{fz}"),
+            });
+            if let Some((gx, gy, gz)) = bot.find_walkable_near(fx, fz, fy) {
+                bot.goto(gx, gy, gz).await;
+                pump(bot, 600).await;
+            }
+        }
+        None => {
+            logger.event(RunEvent::PlanB {
+                phase: Phase::Fortress.name(),
+                reason: "aucune forteresse détectée → on tente les blazes rencontrés en chemin".into(),
+            });
+        }
+    }
+    // 2. Tuer des blazes jusqu'à RODS_TARGET (ou plus de blaze à portée).
+    select_best_sword(bot).await;
+    for _ in 0..40 {
+        if bot.dead {
+            return Step::Retry;
+        }
+        if bot.count_item("blaze_rod") >= RODS_TARGET {
+            break;
+        }
+        // Incident ghast : retraite si un ghast est proche.
+        if let Some(p) = bot.pos {
+            if let Some((_, gpos)) = bot
+                .entities
+                .nearest_kind(entities::GHAST_ENTITY_TYPE, p, 14.0)
+            {
+                logger.event(RunEvent::Custom {
+                    kind: "ghast_retreat".into(),
+                    detail: format!("ghast à {:.1} blocs", dist(p, gpos)),
+                });
+                let (tx, tz) = (p[0] - (gpos[0] - p[0]) * 2.0, p[2] - (gpos[2] - p[2]) * 2.0);
+                if let Some((gx, gy, gz)) =
+                    bot.find_walkable_near(tx as i32, tz as i32, p[1] as i32)
+                {
+                    bot.goto(gx, gy, gz).await;
+                    pump(bot, 200).await;
+                }
+                continue;
+            }
+            let Some((bid, _)) = bot
+                .entities
+                .nearest_kind(entities::BLAZE_ENTITY_TYPE, p, 32.0)
+            else {
+                break;
+            };
+            kill_blaze(bot, bid).await;
+            let _ = bot.collect_drops(6.0).await;
+        } else {
+            break;
+        }
+    }
+    let rods = bot.count_item("blaze_rod");
+    logger.event(RunEvent::Custom {
+        kind: "fortress_loot".into(),
+        detail: format!("blaze_rods={rods}"),
+    });
+    if rods < RODS_MIN {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::Fortress.name(),
+            reason: format!("rods={rods} < {RODS_MIN} → yeux partiels, on continue"),
+        });
+    }
+    logger.split("fortress_done");
+    Step::Next
+}
+
+fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Sélectionne la meilleure épée disponible (iron > stone > golden > wooden > diamond
+/// approché par priorité explicite), sinon la hache.
+async fn select_best_sword(bot: &mut Bot) {
+    for name in [
+        "diamond_sword",
+        "iron_sword",
+        "stone_sword",
+        "golden_sword",
+        "wooden_sword",
+    ] {
+        if bot.count_item(name) > 0
+            && bot
+                .select_hotbar_by_item(crate::recipes::item_id(name))
+                .await
+        {
+            return;
+        }
+    }
+    for name in ["diamond_axe", "iron_axe", "stone_axe", "wooden_axe"] {
+        if bot.count_item(name) > 0
+            && bot
+                .select_hotbar_by_item(crate::recipes::item_id(name))
+                .await
+        {
+            return;
+        }
+    }
+}
+
+/// Attaque un blaze jusqu'à sa disparition (remove_entities) ou 15 coups.
+async fn kill_blaze(bot: &mut Bot, blaze: i32) {
+    for _ in 0..15 {
+        if bot.dead || bot.entities.get(blaze).is_none() {
+            return;
+        }
+        // Approche à portée de mêlée (~3 blocs).
+        if let (Some(p), Some(e)) = (bot.pos, bot.entities.get(blaze)) {
+            if dist(p, e.pos) > 3.0 {
+                let (tx, tz) = (e.pos[0] as i32, e.pos[2] as i32);
+                if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, e.pos[1] as i32) {
+                    bot.goto(gx, gy, gz).await;
+                }
+                for _ in 0..120 {
+                    if bot.path_len() == 0 || bot.entities.get(blaze).is_none() {
+                        break;
+                    }
+                    pump(bot, 1).await;
+                    if bot.dead {
+                        return;
+                    }
+                }
+            }
+        }
+        if bot.interact_entity(blaze, true).await.is_err() {
+            return;
+        }
+        // ~0,6 s entre deux coups.
+        for _ in 0..12 {
+            pump(bot, 1).await;
+            if bot.dead || bot.entities.get(blaze).is_none() {
+                return;
+            }
+        }
+    }
 }
 
 /// Phases pas encore implémentées (une par itération) : abandon propre, loggé.
