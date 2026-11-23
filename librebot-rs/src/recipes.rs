@@ -263,6 +263,12 @@ pub fn recipe_for(result_name: &str) -> Option<Recipe> {
             needs_table: true,
         },
         // --- Yeux de l'Ender ---
+        "blaze_powder" => Recipe {
+            result: id,
+            result_count: 2,
+            ingredients: vec![(item_id("blaze_rod"), 1)],
+            needs_table: false,
+        },
         "ender_eye" => Recipe {
             result: id, result_count: 1,
             ingredients: vec![(item_id("ender_pearl"), 1), (item_id("blaze_powder"), 1)],

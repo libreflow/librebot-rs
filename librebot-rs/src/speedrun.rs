@@ -189,7 +189,8 @@ async fn dispatch(bot: &mut Bot, sr: &mut Speedrun) -> Step {
         Phase::NetherEntry => phase_nether_entry(bot, &mut sr.logger).await,
         Phase::Bastion => phase_bastion(bot, &mut sr.logger).await,
         Phase::Fortress => phase_fortress(bot, &mut sr.logger).await,
-        Phase::Stronghold | Phase::End => phase_stub(sr).await,
+        Phase::Stronghold => phase_stronghold(bot, &mut sr.logger).await,
+        Phase::End => phase_stub(sr).await,
     }
 }
 
@@ -570,7 +571,8 @@ async fn phase_fortress(bot: &mut Bot, logger: &mut RunLogger) -> Step {
         None => {
             logger.event(RunEvent::PlanB {
                 phase: Phase::Fortress.name(),
-                reason: "aucune forteresse détectée → on tente les blazes rencontrés en chemin".into(),
+                reason: "aucune forteresse détectée → on tente les blazes rencontrés en chemin"
+                    .into(),
             });
         }
     }
@@ -699,6 +701,271 @@ async fn kill_blaze(bot: &mut Bot, blaze: i32) {
     }
 }
 
+/// Contrat route.md : 12 yeux pour le portail de l'End.
+const EYES_TARGET: i32 = 12;
+/// Divergence max entre deux lancers d'yeux avant recalcul (route.md §1).
+const MAX_EYE_DIVERGENCE_DEG: f64 = 5.0;
+
+/// Phase 5 `Stronghold` (route.md §1) : contrat transverse (sortie du Nether avec
+/// >= 8 perles, sinon plan B mini-yeux), craft des yeux, triangulation par
+/// >= 2 lancers d'yeux de l'Ender (recalc si divergence > 5°). Split `stronghold_located`.
+async fn phase_stronghold(bot: &mut Bot, logger: &mut RunLogger) -> Step {
+    // 0. Contrat transverse Nether -> Overworld.
+    if bot.dimension.as_deref() == Some("minecraft:the_nether") && !exit_nether(bot, logger).await {
+        return Step::Retry;
+    }
+    if bot.dimension.as_deref() != Some("minecraft:overworld") {
+        logger.event(RunEvent::Custom {
+            kind: "stronghold_dim".into(),
+            detail: format!("dimension={:?}", bot.dimension),
+        });
+        return Step::Retry;
+    }
+    // 1. Crafter les yeux (plan B mini-yeux : autant que perles + poudre dispo).
+    craft_eyes(bot, logger).await;
+    // 2. Triangulation : (point de lancer, direction) par œil lancé.
+    let mut shots: Vec<([f64; 2], [f64; 2])> = Vec::new();
+    let mut stronghold: Option<[f64; 2]> = None;
+    for _ in 0..4 {
+        if bot.dead {
+            return Step::Retry;
+        }
+        if bot.count_item("ender_eye") <= 0 || stronghold.is_some() {
+            break;
+        }
+        let Some((p, v)) = throw_eye(bot, logger).await else {
+            break;
+        };
+        shots.push((p, v));
+        logger.event(RunEvent::Custom {
+            kind: "eye_thrown".into(),
+            detail: format!(
+                "depuis ({:.0},{:.0}) dir ({:.2},{:.2})",
+                p[0], p[1], v[0], v[1]
+            ),
+        });
+        if shots.len() >= 2 {
+            let (p1, v1) = shots[shots.len() - 2];
+            let (p2, v2) = shots[shots.len() - 1];
+            match triangulate(p1, v1, p2, v2) {
+                Some(s) => {
+                    // 3e lancer de vérification : divergence > 5° -> recalc (route.md).
+                    if bot.count_item("ender_eye") > 0 {
+                        if let Some((p3, v3)) = throw_eye(bot, logger).await {
+                            shots.push((p3, v3));
+                            let pred = [s[0] - p3[0], s[1] - p3[1]];
+                            let ang = angle_deg(v3, pred);
+                            if ang > MAX_EYE_DIVERGENCE_DEG {
+                                logger.event(RunEvent::Custom {
+                                    kind: "eye_divergence".into(),
+                                    detail: format!(
+                                        "{ang:.1}° > {MAX_EYE_DIVERGENCE_DEG}° → recalc"
+                                    ),
+                                });
+                                stronghold = None;
+                                continue;
+                            }
+                        }
+                    }
+                    stronghold = Some(s);
+                }
+                None => {
+                    // Droites quasi parallèles : avancer de ~100 blocs le long de v1.
+                    advance_along(
+                        bot,
+                        shots.last().map(|(_, v)| *v).unwrap_or([1.0, 0.0]),
+                        100,
+                    )
+                    .await;
+                }
+            }
+        } else {
+            // Premier lancer : avancer de ~100 blocs dans la direction de l'œil.
+            advance_along(bot, v, 100).await;
+        }
+    }
+    let Some([sx, sz]) = stronghold else {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::Stronghold.name(),
+            reason: "triangulation impossible (yeux insuffisants ou parallèles)".into(),
+        });
+        return Step::Abort("stronghold: pas de triangulation".into());
+    };
+    logger.event(RunEvent::Custom {
+        kind: "stronghold_triangulated".into(),
+        detail: format!("({sx:.0},{sz:.0}) avec {} lancers", shots.len()),
+    });
+    // 3. Aller au stronghold.
+    if let Some((gx, gy, gz)) = bot.find_walkable_near(sx as i32, sz as i32, 64) {
+        bot.goto(gx, gy, gz).await;
+        pump(bot, 1200).await; // ~60 s de trajet
+    }
+    if bot.dead {
+        return Step::Retry;
+    }
+    logger.split("stronghold_located");
+    Step::Next
+}
+
+/// Sortie du Nether (contrat transverse route.md) : trouver un portail, y aller,
+/// attendre `minecraft:overworld`. Split `nether_exit` + event perles (PlanB
+/// mini-yeux si < PEARLS_TARGET).
+async fn exit_nether(bot: &mut Bot, logger: &mut RunLogger) -> bool {
+    let mut portal = None;
+    for tries in 0..4u32 {
+        if let Some(p) = bot.find_block_any(&["nether_portal"], 48 + tries as i32 * 32) {
+            portal = Some(p);
+            break;
+        }
+        explore(bot, tries).await;
+        if bot.dead {
+            return false;
+        }
+    }
+    let Some((px, py, pz)) = portal else {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::Stronghold.name(),
+            reason: "pas de portail de retour trouvé dans le Nether (nether_exit)".into(),
+        });
+        return false;
+    };
+    bot.goto(px, py, pz).await;
+    for _ in 0..1200 {
+        pump(bot, 1).await;
+        if bot.dead {
+            return false;
+        }
+        if bot.dimension.as_deref() == Some("minecraft:overworld") {
+            let pearls = bot.count_item("ender_pearl");
+            logger.event(RunEvent::Custom {
+                kind: "nether_exit".into(),
+                detail: format!("perles={pearls} yeux={}", bot.count_item("ender_eye")),
+            });
+            if pearls < PEARLS_TARGET {
+                logger.event(RunEvent::PlanB {
+                    phase: Phase::Stronghold.name(),
+                    reason: format!("perles={pearls} < {PEARLS_TARGET} → plan B mini-yeux"),
+                });
+            }
+            logger.split("nether_exit");
+            return true;
+        }
+    }
+    false
+}
+
+/// Crafte les yeux de l'Ender (poudre depuis les rods, puis perle + poudre).
+async fn craft_eyes(bot: &mut Bot, logger: &mut RunLogger) {
+    while bot.count_item("blaze_powder") < EYES_TARGET && bot.count_item("blaze_rod") > 0 {
+        if !bot.craft("blaze_powder").await {
+            break;
+        }
+    }
+    let mut made = 0;
+    while bot.count_item("ender_eye") + made < EYES_TARGET
+        && bot.count_item("ender_pearl") > 0
+        && bot.count_item("blaze_powder") > 0
+    {
+        if !bot.craft("ender_eye").await {
+            break;
+        }
+        made += 1;
+    }
+    logger.event(RunEvent::Custom {
+        kind: "eyes_crafted".into(),
+        detail: format!(
+            "yeux={} perles={} poudre={}",
+            bot.count_item("ender_eye"),
+            bot.count_item("ender_pearl"),
+            bot.count_item("blaze_powder")
+        ),
+    });
+}
+
+/// Lance un œil de l'Ender et mesure sa direction via la trajectoire de
+/// l'entité `eye_of_ender` (kind 39). Retourne (point de lancer, direction 2D normalisée).
+async fn throw_eye(bot: &mut Bot, logger: &mut RunLogger) -> Option<([f64; 2], [f64; 2])> {
+    let eye = crate::recipes::item_id("ender_eye");
+    if !bot.select_hotbar_by_item(eye).await {
+        logger.event(RunEvent::Custom {
+            kind: "eye_missing".into(),
+            detail: "pas d'œil de l'Ender en main".into(),
+        });
+        return None;
+    }
+    let p0 = bot.pos?;
+    if bot.use_item().await.is_err() {
+        return None;
+    }
+    // Attendre le spawn de l'entité œil.
+    let mut eye_id = None;
+    for _ in 0..40 {
+        pump(bot, 1).await;
+        if bot.dead {
+            return None;
+        }
+        if eye_id.is_none() {
+            eye_id = bot
+                .entities
+                .nearest_kind(entities::EYE_OF_ENDER_ENTITY_TYPE, p0, 8.0)
+                .map(|(id, _)| id);
+        }
+    }
+    let id = eye_id?;
+    let start = bot.entities.get(id)?.pos;
+    // Suivre la trajectoire ~1,5 s.
+    for _ in 0..30 {
+        pump(bot, 1).await;
+        if bot.entities.get(id).is_none() {
+            break;
+        }
+    }
+    let end = bot.entities.get(id)?.pos;
+    let d = [end[0] - start[0], end[2] - start[2]];
+    let n = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if n < 0.5 {
+        return None;
+    }
+    Some(([p0[0], p0[2]], [d[0] / n, d[1] / n]))
+}
+
+/// Avance d'environ `dist` blocs le long de la direction 2D `v` (déterministe).
+async fn advance_along(bot: &mut Bot, v: [f64; 2], dist: i32) {
+    if let Some(p) = bot.pos {
+        let tx = (p[0] + v[0] * dist as f64) as i32;
+        let tz = (p[2] + v[1] * dist as f64) as i32;
+        if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, p[1] as i32) {
+            bot.goto(gx, gy, gz).await;
+            pump(bot, 600).await;
+        }
+    }
+}
+
+/// Intersection de deux demi-droites 2D (p1 + t*v1) et (p2 + s*v2), t >= 0.
+/// None si quasi parallèles ou intersection derrière le premier lancer.
+fn triangulate(p1: [f64; 2], v1: [f64; 2], p2: [f64; 2], v2: [f64; 2]) -> Option<[f64; 2]> {
+    let det = v1[0] * v2[1] - v1[1] * v2[0];
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let t = ((p2[0] - p1[0]) * v2[1] - (p2[1] - p1[1]) * v2[0]) / det;
+    if t < 0.0 {
+        return None;
+    }
+    Some([p1[0] + v1[0] * t, p1[1] + v1[1] * t])
+}
+
+/// Angle en degrés entre deux vecteurs 2D (non normalisés acceptés).
+fn angle_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let na = (a[0] * a[0] + a[1] * a[1]).sqrt();
+    let nb = (b[0] * b[0] + b[1] * b[1]).sqrt();
+    if na < 1e-9 || nb < 1e-9 {
+        return 0.0;
+    }
+    let cos = (a[0] * b[0] + a[1] * b[1]) / (na * nb);
+    cos.clamp(-1.0, 1.0).acos().to_degrees()
+}
+
 /// Phases pas encore implémentées (une par itération) : abandon propre, loggé.
 async fn phase_stub(sr: &mut Speedrun) -> Step {
     Step::Abort(format!(
@@ -742,6 +1009,34 @@ mod tests {
         assert!(sr.transition(Step::Retry));
         assert!(sr.transition(Step::Retry));
         assert!(!sr.transition(Step::Retry)); // MAX_RETRIES épuisés
+    }
+
+    #[test]
+    fn triangulation_intersection_et_divergence() {
+        // Deux lancers perpendiculaires : intersection en (100, 0) depuis (0,0) dir +x
+        // et depuis (100,-50) dir +z.
+        let s = triangulate([0.0, 0.0], [1.0, 0.0], [100.0, -50.0], [0.0, 1.0]);
+        assert_eq!(s, Some([100.0, 0.0]));
+        // Parallèles -> None
+        assert_eq!(
+            triangulate([0.0, 0.0], [1.0, 0.0], [0.0, 5.0], [1.0, 0.0]),
+            None
+        );
+        // Intersection derrière le lancer -> None
+        assert_eq!(
+            triangulate([0.0, 0.0], [1.0, 0.0], [-50.0, 1.0], [0.0, 1.0]),
+            None
+        );
+        // Angle : 0° identique, 90° perpendiculaire, 180° opposé
+        assert!(angle_deg([1.0, 0.0], [2.0, 0.0]) < 1e-9);
+        assert!((angle_deg([1.0, 0.0], [0.0, 1.0]) - 90.0).abs() < 1e-9);
+        assert!((angle_deg([1.0, 0.0], [-1.0, 0.0]) - 180.0).abs() < 1e-9);
+        // Divergence de 3° < seuil 5° ; 10° > seuil
+        let v = [1.0f64, 0.0];
+        let v3 = [3.0f64.mul_add(1.0, 0.0), 3.0f64.to_radians().sin()]; // ~3°
+        assert!(angle_deg(v, v3) < MAX_EYE_DIVERGENCE_DEG);
+        let v10 = [10.0f64.to_radians().cos(), 10.0f64.to_radians().sin()];
+        assert!(angle_deg(v, v10) > MAX_EYE_DIVERGENCE_DEG);
     }
 
     #[test]

@@ -736,6 +736,19 @@ impl Bot {
         self.conn.send(ids::play_s::SWING, &s).await
     }
 
+    /// Use Item (0x39, 767) main hand : lancer/utiliser l'objet en main
+    /// (ex. œil de l'Ender pour la triangulation du stronghold).
+    pub async fn use_item(&mut self) -> std::io::Result<()> {
+        let seq = self.sequence + 1;
+        self.sequence = seq;
+        let mut b = Vec::new();
+        crate::protocol::write_varint(0, &mut b); // main hand
+        crate::protocol::write_varint(seq, &mut b);
+        b.extend_from_slice(&self.yaw.to_be_bytes());
+        b.extend_from_slice(&self.pitch.to_be_bytes());
+        self.conn.send(ids::play_s::USE_ITEM, &b).await
+    }
+
     /// Ferme la fenêtre ouverte (container_close 0x0f).
     pub async fn close_container(&mut self) -> std::io::Result<()> {
         if let Some(w) = self.open_window_id {
