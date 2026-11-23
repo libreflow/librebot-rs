@@ -8,6 +8,8 @@ pub struct Config {
     pub port: u16,
     pub username: String,
     pub reconnect_secs: u64,
+    /// "survie" (mission auto bois→pierre→fer) ou "speedrun" (FSM route.md).
+    pub mode: String,
 }
 
 impl Default for Config {
@@ -17,6 +19,7 @@ impl Default for Config {
             port: 25565,
             username: "LibreBot".into(),
             reconnect_secs: 30,
+            mode: "survie".into(),
         }
     }
 }
@@ -24,7 +27,12 @@ impl Default for Config {
 impl Config {
     /// Charge `config.json` si présent (host, port, username, reconnectSecs),
     /// puis applique les surcharges `--host`, `--port`, `--username`.
-    pub fn load(path: &Path, host: Option<&str>, port: Option<u16>, username: Option<&str>) -> Self {
+    pub fn load(
+        path: &Path,
+        host: Option<&str>,
+        port: Option<u16>,
+        username: Option<&str>,
+    ) -> Self {
         let mut c = Config::default();
         if let Ok(raw) = std::fs::read_to_string(path) {
             if let Some(v) = json_field(&raw, "host") {
@@ -42,6 +50,9 @@ impl Config {
                 if let Ok(p) = v.parse() {
                     c.reconnect_secs = p;
                 }
+            }
+            if let Some(v) = json_field(&raw, "mode") {
+                c.mode = v;
             }
         }
         if let Some(h) = host {

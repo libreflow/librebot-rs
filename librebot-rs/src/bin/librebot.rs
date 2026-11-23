@@ -5,23 +5,35 @@ use librebot_rs::config::Config;
 use librebot_rs::protocol::PROTOCOL_VERSION;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .try_init();
     let mut host = None;
     let mut port = None;
     let mut username = None;
+    let mut speedrun = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--host" => host = args.next(),
             "--port" => port = args.next().and_then(|v| v.parse().ok()),
             "--username" => username = args.next(),
+            "--speedrun" => speedrun = true,
             _ => {}
         }
     }
     let cfg_path = PathBuf::from("config.json");
-    let cfg = Config::load(&cfg_path, host.as_deref(), port, username.as_deref());
+    let mut cfg = Config::load(&cfg_path, host.as_deref(), port, username.as_deref());
+    if speedrun {
+        cfg.mode = "speedrun".into();
+    }
+    let run_speedrun = cfg.mode == "speedrun";
 
     println!(
         "librebot-rs (protocole {}) — cible {}:{} en tant que {}",
@@ -29,7 +41,7 @@ async fn main() {
     );
     loop {
         match Bot::connect(&cfg.host, cfg.port, &cfg.username).await {
-            Ok(bot) => session(bot).await,
+            Ok(bot) => session(bot, run_speedrun).await,
             Err(e) => eprintln!("connexion impossible : {}", e),
         }
         println!(
@@ -40,7 +52,7 @@ async fn main() {
     }
 }
 
-async fn session(bot: Bot) {
+async fn session(bot: Bot, run_speedrun: bool) {
     let (tx, mut rx) = mpsc::channel::<String>(16);
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -66,6 +78,12 @@ async fn session(bot: Bot) {
             ev = bot.play_turn() => match ev {
                 Ok(Event::Connected) => {
                     println!("[{}] dans le monde {} (entité {:?})", bot.username, bot.dimension.as_deref().unwrap_or("?"), bot.entity_id);
+                    if run_speedrun {
+                        println!("--- Démarrage du speedrun RSG (route.md) ---");
+                        librebot_rs::speedrun::run(&mut bot).await;
+                        println!("--- Run terminé, bot en attente de commandes ---");
+                        continue;
+                    }
                     // Lancer la mission survie automatiquement
                     println!("--- Démarrage de la mission survie ---");
                     let r1 = bot.phase_wood().await;
