@@ -112,7 +112,7 @@ impl Bot {
 
     /// Cherche une position marchable (solide dessous, air au-dessus, pas de liquide)
     /// près de (x, z), en balayant de `y_hint` vers le haut puis vers le bas.
-    fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
+    pub(crate) fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
         let y_top = (y_hint + 24).min(crate::world::MIN_Y + crate::world::WORLD_HEIGHT - 2);
         let y_bot = (y_hint - 48).max(crate::world::MIN_Y + 1);
         let mut best: Option<(i32, i32, i32, i32)> = None;

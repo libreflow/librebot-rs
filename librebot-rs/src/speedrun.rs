@@ -185,9 +185,8 @@ pub async fn run(bot: &mut Bot) {
 async fn dispatch(bot: &mut Bot, sr: &mut Speedrun) -> Step {
     match sr.phase {
         Phase::Spawn => phase_spawn(bot, &mut sr.logger).await,
-        Phase::NetherEntry | Phase::Bastion | Phase::Fortress | Phase::Stronghold | Phase::End => {
-            phase_stub(sr).await
-        }
+        Phase::NetherEntry => phase_nether_entry(bot, &mut sr.logger).await,
+        Phase::Bastion | Phase::Fortress | Phase::Stronghold | Phase::End => phase_stub(sr).await,
     }
 }
 
@@ -224,6 +223,66 @@ async fn phase_spawn(bot: &mut Bot, logger: &mut RunLogger) -> Step {
     }
     logger.split("spawn_ready");
     Step::Next
+}
+
+/// Phase 2 `NetherEntry` (route.md §1) : trouver un portail ruiné (`nether_portal`)
+/// dans les chunks chargés, s'y rendre, attendre le changement de dimension
+/// (`minecraft:the_nether`, lu via le paquet respawn). Split `nether_entry`.
+/// Exploration déterministe (aucun aléatoire). Plan B (portail à construire) :
+/// itération suivante, ici Abort propre si aucun portail à portée.
+async fn phase_nether_entry(bot: &mut Bot, logger: &mut RunLogger) -> Step {
+    let mut portal = None;
+    let mut radius = 32;
+    for tries in 0..4 {
+        if let Some(p) = bot.find_block_any(&["nether_portal"], radius) {
+            portal = Some(p);
+            break;
+        }
+        // Exploration déterministe pour charger de nouveaux chunks.
+        if let Some(p) = bot.pos {
+            let angle = (tries as f64) * 2.4;
+            let tx = (p[0] + angle.cos() * 40.0) as i32;
+            let tz = (p[2] + angle.sin() * 40.0) as i32;
+            let y = p[1] as i32;
+            if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, y) {
+                bot.goto(gx, gy, gz).await;
+                pump(bot, 400).await; // ~20 s de trajet
+                if bot.dead {
+                    return Step::Retry;
+                }
+            }
+        }
+        radius += 32;
+    }
+    let Some((px, py, pz)) = portal else {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::NetherEntry.name(),
+            reason: "aucun portail ruiné à portée — construction de portail : itération suivante"
+                .into(),
+        });
+        return Step::Abort("nether_entry: pas de portail ruiné trouvé".into());
+    };
+    logger.event(RunEvent::Custom {
+        kind: "portal_found".into(),
+        detail: format!("{px},{py},{pz}"),
+    });
+    bot.goto(px, py, pz).await;
+    // Attendre l'arrivée puis le changement de dimension (max ~60 s).
+    for _ in 0..1200 {
+        pump(bot, 1).await;
+        if bot.dead {
+            return Step::Retry;
+        }
+        if bot.dimension.as_deref() == Some("minecraft:the_nether") {
+            logger.split("nether_entry");
+            return Step::Next;
+        }
+    }
+    logger.event(RunEvent::Custom {
+        kind: "nether_entry_timeout".into(),
+        detail: format!("dimension={:?}", bot.dimension),
+    });
+    Step::Retry
 }
 
 /// Phases pas encore implémentées (une par itération) : abandon propre, loggé.

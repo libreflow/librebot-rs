@@ -424,8 +424,14 @@ impl Bot {
                     self.send_respawn().await?;
                     return Ok(Event::Died);
                 }
-                // respawn (0x47) : le serveur renvoie le joueur (nouvelle dimension/spawn)
-                Packet(ids::play_c::RESPAWN, _) => {
+                // respawn (0x47) : le serveur renvoie le joueur (nouvelle dimension/spawn).
+                // Même tête de paquet que le SpawnInfo du login : on relit la dimension
+                // (ex. minecraft:the_nether après un portail).
+                Packet(ids::play_c::RESPAWN, body) => {
+                    let mut b = Body(&body);
+                    if let Some(dim) = Self::parse_world(&mut b) {
+                        self.dimension = Some(dim);
+                    }
                     self.dead = false;
                     self.health = 20.0;
                 }
