@@ -186,3 +186,56 @@ async fn combat_blaze_use_entity_attack() {
 
     server.await.unwrap();
 }
+
+/// End : le dragon (kind 31) est détecté et attaqué (use_entity 0x16 action=1).
+#[tokio::test]
+async fn combat_dragon_use_entity_attack() {
+    use librebot_rs::entities::ENDER_DRAGON_ENTITY_TYPE;
+
+    let (listener, addr) = free_listener().await;
+    let server = tokio::spawn(async move {
+        let mut conn = prologue(listener).await;
+        conn.send(0x2b, &login_body(7)).await.unwrap();
+        conn.send(0x27, &floor_chunk_body(0, 0, None))
+            .await
+            .unwrap();
+        conn.send(0x40, &position_body(1.5, (MIN_Y + 1) as f64, 1.5, 1))
+            .await
+            .unwrap();
+        let _ = expect(&mut conn, 0x00).await;
+        conn.send(
+            0x01,
+            &spawn_entity_body(99, ENDER_DRAGON_ENTITY_TYPE, 10.5, (MIN_Y + 5) as f64, 1.5),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let body = expect(&mut conn, 0x16).await;
+        let mut b = librebot_rs::protocol::Body(&body);
+        assert_eq!(b.varint(), 99, "target dragon");
+        assert_eq!(b.varint(), 1, "action attack");
+        let _ = expect(&mut conn, 0x36).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+
+    let mut bot = Bot::connect(&addr.ip().to_string(), addr.port(), "LibreBot")
+        .await
+        .unwrap();
+    loop {
+        match timeout(Duration::from_secs(5), bot.play_turn()).await {
+            Ok(Ok(Event::Connected)) => {}
+            Ok(Ok(Event::Spawned)) => break,
+            Ok(Ok(_)) => {}
+            _ => panic!("attendu Connected/Spawned"),
+        }
+    }
+    bot.drain_packets().await;
+    let (did, _) = bot
+        .entities
+        .nearest_kind(ENDER_DRAGON_ENTITY_TYPE, bot.pos.unwrap_or([0.0; 3]), 64.0)
+        .expect("dragon non détecté");
+    assert_eq!(did, 99);
+    bot.interact_entity(did, true).await.unwrap();
+
+    server.await.unwrap();
+}

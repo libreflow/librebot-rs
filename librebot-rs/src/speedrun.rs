@@ -190,7 +190,7 @@ async fn dispatch(bot: &mut Bot, sr: &mut Speedrun) -> Step {
         Phase::Bastion => phase_bastion(bot, &mut sr.logger).await,
         Phase::Fortress => phase_fortress(bot, &mut sr.logger).await,
         Phase::Stronghold => phase_stronghold(bot, &mut sr.logger).await,
-        Phase::End => phase_stub(sr).await,
+        Phase::End => phase_end(bot, &mut sr.logger).await,
     }
 }
 
@@ -610,7 +610,7 @@ async fn phase_fortress(bot: &mut Bot, logger: &mut RunLogger) -> Step {
             else {
                 break;
             };
-            kill_blaze(bot, bid).await;
+            kill_melee(bot, bid, 15).await;
             let _ = bot.collect_drops(6.0).await;
         } else {
             break;
@@ -664,21 +664,21 @@ async fn select_best_sword(bot: &mut Bot) {
     }
 }
 
-/// Attaque un blaze jusqu'à sa disparition (remove_entities) ou 15 coups.
-async fn kill_blaze(bot: &mut Bot, blaze: i32) {
-    for _ in 0..15 {
-        if bot.dead || bot.entities.get(blaze).is_none() {
+/// Attaque une entité en mêlée jusqu'à sa disparition (remove_entities) ou
+/// `max_hits` coups : approche à ~3 blocs, puis attack (0x16) toutes les ~0,6 s.
+async fn kill_melee(bot: &mut Bot, target: i32, max_hits: u32) {
+    for _ in 0..max_hits {
+        if bot.dead || bot.entities.get(target).is_none() {
             return;
         }
-        // Approche à portée de mêlée (~3 blocs).
-        if let (Some(p), Some(e)) = (bot.pos, bot.entities.get(blaze)) {
+        if let (Some(p), Some(e)) = (bot.pos, bot.entities.get(target)) {
             if dist(p, e.pos) > 3.0 {
                 let (tx, tz) = (e.pos[0] as i32, e.pos[2] as i32);
                 if let Some((gx, gy, gz)) = bot.find_walkable_near(tx, tz, e.pos[1] as i32) {
                     bot.goto(gx, gy, gz).await;
                 }
                 for _ in 0..120 {
-                    if bot.path_len() == 0 || bot.entities.get(blaze).is_none() {
+                    if bot.path_len() == 0 || bot.entities.get(target).is_none() {
                         break;
                     }
                     pump(bot, 1).await;
@@ -688,13 +688,12 @@ async fn kill_blaze(bot: &mut Bot, blaze: i32) {
                 }
             }
         }
-        if bot.interact_entity(blaze, true).await.is_err() {
+        if bot.interact_entity(target, true).await.is_err() {
             return;
         }
-        // ~0,6 s entre deux coups.
         for _ in 0..12 {
             pump(bot, 1).await;
-            if bot.dead || bot.entities.get(blaze).is_none() {
+            if bot.dead || bot.entities.get(target).is_none() {
                 return;
             }
         }
@@ -966,12 +965,121 @@ fn angle_deg(a: [f64; 2], b: [f64; 2]) -> f64 {
     cos.clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Phases pas encore implémentées (une par itération) : abandon propre, loggé.
-async fn phase_stub(sr: &mut Speedrun) -> Step {
-    Step::Abort(format!(
-        "phase '{}' non implémentée (itération suivante selon route.md)",
-        sr.phase.name()
-    ))
+/// Phase 6 `End` (route.md §1) : remplir le portail de l'End (end_portal_frame +
+/// yeux de l'Ender), entrer dans `minecraft:the_end`, tuer l'Ender Dragon en
+/// mêlée. Split `dragon_dead` = fin du run (Step::Done).
+async fn phase_end(bot: &mut Bot, logger: &mut RunLogger) -> Step {
+    if bot.dimension.as_deref() != Some("minecraft:the_end") && !enter_end(bot, logger).await {
+        return Step::Retry;
+    }
+    select_best_sword(bot).await;
+    for _ in 0..60 {
+        if bot.dead {
+            return Step::Retry;
+        }
+        let Some(p) = bot.pos else { break };
+        let Some((did, _)) = bot
+            .entities
+            .nearest_kind(entities::ENDER_DRAGON_ENTITY_TYPE, p, 64.0)
+        else {
+            break; // plus de dragon à portée
+        };
+        logger.event(RunEvent::Custom {
+            kind: "dragon_fight".into(),
+            detail: format!(
+                "dragon à {:.1} blocs",
+                dist(p, bot.entities.get(did).map(|e| e.pos).unwrap_or(p))
+            ),
+        });
+        kill_melee(bot, did, 40).await;
+        let _ = bot.collect_drops(8.0).await; // œuf du dragon, etc.
+    }
+    let still_alive = bot
+        .pos
+        .and_then(|p| {
+            bot.entities
+                .nearest_kind(entities::ENDER_DRAGON_ENTITY_TYPE, p, 128.0)
+        })
+        .is_some();
+    if still_alive {
+        logger.event(RunEvent::Custom {
+            kind: "dragon_alive".into(),
+            detail: "dragon encore vivant → retry".into(),
+        });
+        return Step::Retry;
+    }
+    logger.split("dragon_dead");
+    Step::Done
+}
+
+/// Remplit le portail de l'End avec les yeux en inventaire (use_item_on sur les
+/// end_portal_frame) et attend le changement de dimension `minecraft:the_end`.
+async fn enter_end(bot: &mut Bot, logger: &mut RunLogger) -> bool {
+    let mut frame0 = None;
+    for tries in 0..4u32 {
+        if let Some(p) = bot.find_block_any(&["end_portal_frame"], 64 + tries as i32 * 32) {
+            frame0 = Some(p);
+            break;
+        }
+        explore(bot, tries).await;
+        if bot.dead {
+            return false;
+        }
+    }
+    let Some((fx, fy, fz)) = frame0 else {
+        logger.event(RunEvent::PlanB {
+            phase: Phase::End.name(),
+            reason: "aucun end_portal_frame trouvé (stronghold non atteint ?)".into(),
+        });
+        return false;
+    };
+    if let Some((gx, gy, gz)) = bot.find_walkable_near(fx, fz, fy) {
+        bot.goto(gx, gy, gz).await;
+        pump(bot, 600).await;
+    }
+    let eye = crate::recipes::item_id("ender_eye");
+    for _ in 0..40 {
+        if bot.dead {
+            return false;
+        }
+        if bot.dimension.as_deref() == Some("minecraft:the_end") {
+            logger.split("end_entry");
+            return true;
+        }
+        if bot.count_item("ender_eye") <= 0 {
+            logger.event(RunEvent::PlanB {
+                phase: Phase::End.name(),
+                reason: "plus d'yeux de l'Ender, portail incomplet".into(),
+            });
+            return false;
+        }
+        let Some((ex, ey, ez)) = bot.find_block_any(&["end_portal_frame"], 16) else {
+            break;
+        };
+        // Approcher à portée d'interaction puis poser l'œil sur la frame.
+        if let Some(p) = bot.pos {
+            let d =
+                ((p[0] - (ex as f64 + 0.5)).powi(2) + (p[2] - (ez as f64 + 0.5)).powi(2)).sqrt();
+            if d > 4.0 {
+                if let Some((gx, gy, gz)) = bot.find_walkable_near(ex, ez, ey) {
+                    bot.goto(gx, gy, gz).await;
+                    for _ in 0..300 {
+                        if bot.path_len() == 0 {
+                            break;
+                        }
+                        pump(bot, 1).await;
+                        if bot.dead {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = bot.select_hotbar_by_item(eye).await;
+        let _ = bot.place(ex, ey, ez, 1).await;
+        pump(bot, 40).await;
+    }
+    bot.dimension.as_deref() == Some("minecraft:the_end")
 }
 
 #[cfg(test)]
