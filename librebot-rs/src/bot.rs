@@ -424,8 +424,14 @@ impl Bot {
                     self.send_respawn().await?;
                     return Ok(Event::Died);
                 }
-                // respawn (0x47) : le serveur renvoie le joueur (nouvelle dimension/spawn)
-                Packet(ids::play_c::RESPAWN, _) => {
+                // respawn (0x47) : le serveur renvoie le joueur (nouvelle dimension/spawn).
+                // Même tête de paquet que le SpawnInfo du login : on relit la dimension
+                // (ex. minecraft:the_nether après un portail).
+                Packet(ids::play_c::RESPAWN, body) => {
+                    let mut b = Body(&body);
+                    if let Some(dim) = Self::parse_world(&mut b) {
+                        self.dimension = Some(dim);
+                    }
                     self.dead = false;
                     self.health = 20.0;
                 }
@@ -714,6 +720,42 @@ impl Bot {
         let body = window_click_body(window_id, state, slot, button, mode, carried);
         self.conn.send(ids::play_s::WINDOW_CLICK, &body).await?;
         Ok(state)
+    }
+
+    /// Use Entity (0x16, 767) : action 0 = interact (ex. barter avec un piglin
+    /// en tenant un lingot d'or), 1 = attack. Envoie aussi un swing.
+    pub async fn interact_entity(&mut self, target: i32, attack: bool) -> std::io::Result<()> {
+        let mut b = Vec::new();
+        crate::protocol::write_varint(target, &mut b);
+        crate::protocol::write_varint(if attack { 1 } else { 0 }, &mut b);
+        crate::protocol::write_varint(0, &mut b); // main hand
+        b.push(0); // sneaking
+        self.conn.send(ids::play_s::USE_ENTITY, &b).await?;
+        let mut s = Vec::new();
+        crate::protocol::write_varint(0, &mut s); // main hand
+        self.conn.send(ids::play_s::SWING, &s).await
+    }
+
+    /// Use Item (0x39, 767) main hand : lancer/utiliser l'objet en main
+    /// (ex. œil de l'Ender pour la triangulation du stronghold).
+    pub async fn use_item(&mut self) -> std::io::Result<()> {
+        let seq = self.sequence + 1;
+        self.sequence = seq;
+        let mut b = Vec::new();
+        crate::protocol::write_varint(0, &mut b); // main hand
+        crate::protocol::write_varint(seq, &mut b);
+        b.extend_from_slice(&self.yaw.to_be_bytes());
+        b.extend_from_slice(&self.pitch.to_be_bytes());
+        self.conn.send(ids::play_s::USE_ITEM, &b).await
+    }
+
+    /// Ferme la fenêtre ouverte (container_close 0x0f).
+    pub async fn close_container(&mut self) -> std::io::Result<()> {
+        if let Some(w) = self.open_window_id {
+            self.conn.send(ids::play_s::CONTAINER_CLOSE, &[w]).await?;
+            self.open_window_id = None;
+        }
+        Ok(())
     }
 
     /// Le minage en cours est-il terminé ?

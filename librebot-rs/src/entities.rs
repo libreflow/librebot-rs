@@ -6,6 +6,13 @@ use std::collections::HashMap;
 
 /// Type d'entité `minecraft:item` dans le registre 1.21.1.
 pub const ITEM_ENTITY_TYPE: i32 = 58;
+/// Types d'entités du registre 1.21.1 (protocole 767) utiles au speedrun.
+pub const BLAZE_ENTITY_TYPE: i32 = 8;
+pub const GHAST_ENTITY_TYPE: i32 = 45;
+pub const PIGLIN_ENTITY_TYPE: i32 = 78;
+pub const PIGLIN_BRUTE_ENTITY_TYPE: i32 = 79;
+pub const ENDER_DRAGON_ENTITY_TYPE: i32 = 31;
+pub const EYE_OF_ENDER_ENTITY_TYPE: i32 = 39;
 
 #[derive(Debug, Clone)]
 pub struct Entity {
@@ -106,6 +113,27 @@ impl Entities {
     }
 
     /// Drop d'item le plus proche de `from`, dans un rayon donné.
+    pub fn get(&self, id: i32) -> Option<&Entity> {
+        self.map.get(&id)
+    }
+
+    /// Entité d'un type donné la plus proche de `from`, dans `radius`.
+    pub fn nearest_kind(&self, kind: i32, from: [f64; 3], radius: f64) -> Option<(i32, [f64; 3])> {
+        self.map
+            .values()
+            .filter(|e| e.kind == kind)
+            .map(|e| {
+                let d = ((e.pos[0] - from[0]).powi(2)
+                    + (e.pos[1] - from[1]).powi(2)
+                    + (e.pos[2] - from[2]).powi(2))
+                .sqrt();
+                (d, e)
+            })
+            .filter(|(d, _)| *d <= radius)
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, e)| (e.id, e.pos))
+    }
+
     pub fn nearest_item(&self, from: [f64; 3], radius: f64) -> Option<(i32, [f64; 3])> {
         let mut best: Option<(i32, [f64; 3], f64)> = None;
         for e in self.map.values() {
@@ -159,5 +187,22 @@ mod tests {
         write_varint(10, &mut rm);
         assert_eq!(e.remove(&rm), vec![10]);
         assert_eq!(e.count_items(), 0);
+    }
+
+    #[test]
+    fn nearest_kind_trouve_piglin() {
+        let mut e = Entities::new();
+        e.spawn(&spawn_body(20, PIGLIN_ENTITY_TYPE, 5.0, 1.0, 0.0));
+        e.spawn(&spawn_body(21, BLAZE_ENTITY_TYPE, 2.0, 1.0, 0.0));
+        let (id, pos) = e.nearest_kind(PIGLIN_ENTITY_TYPE, [0.0, 0.0, 0.0], 24.0).unwrap();
+        assert_eq!(id, 20);
+        assert!((pos[0] - 5.0).abs() < 1e-9);
+        // hors rayon -> None
+        assert!(e.nearest_kind(PIGLIN_ENTITY_TYPE, [0.0, 0.0, 0.0], 3.0).is_none());
+        // blaze trouvé aussi
+        assert_eq!(e.nearest_kind(BLAZE_ENTITY_TYPE, [0.0, 0.0, 0.0], 24.0).map(|(i, _)| i), Some(21));
+        // get
+        assert!(e.get(20).is_some());
+        assert!(e.get(99).is_none());
     }
 }

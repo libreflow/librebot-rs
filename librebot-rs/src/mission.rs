@@ -112,7 +112,7 @@ impl Bot {
 
     /// Cherche une position marchable (solide dessous, air au-dessus, pas de liquide)
     /// près de (x, z), en balayant de `y_hint` vers le haut puis vers le bas.
-    fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
+    pub(crate) fn find_walkable_near(&self, x: i32, z: i32, y_hint: i32) -> Option<(i32, i32, i32)> {
         let y_top = (y_hint + 24).min(crate::world::MIN_Y + crate::world::WORLD_HEIGHT - 2);
         let y_bot = (y_hint - 48).max(crate::world::MIN_Y + 1);
         let mut best: Option<(i32, i32, i32, i32)> = None;
@@ -318,7 +318,7 @@ impl Bot {
         if let Some(c) = self.inventory.carried.clone() {
             if c.id == recipe.result {
                 let empty = (9..45i16).find(|&i| {
-                    self.inventory.slots.get(i as usize).map_or(true, |s| s.is_none())
+                    self.inventory.slots.get(i as usize).is_none_or(|s| s.is_none())
                 });
                 if let Some(slot) = empty {
                     self.click_window_carried(window_id, slot, 0, 0, Some((c.id, c.count)))
@@ -480,12 +480,15 @@ impl Bot {
                 self.goto_and_dig(x, y, z).await;
                 // Miner aussi les blocs au-dessus (tronc vertical)
                 for dy in 1..4 {
-                    if self.world.block_state(x, y + dy, z).is_some() {
-                        let name = crate::blocks_gen::block_name(self.world.block_state(x, y + dy, z).unwrap());
-                        if name.ends_with("_log") {
-                            self.goto_and_dig(x, y + dy, z).await;
-                        } else { break; }
-                    } else { break; }
+                    match self.world.block_state(x, y + dy, z) {
+                        Some(state) => {
+                            let name = crate::blocks_gen::block_name(state);
+                            if name.ends_with("_log") {
+                                self.goto_and_dig(x, y + dy, z).await;
+                            } else { break; }
+                        }
+                        None => break, // chunk non chargé : on ne devine pas
+                    }
                 }
             } else {
                 println!("pas de tronc trouvé (rayon {}), on avance au hasard...", radius);

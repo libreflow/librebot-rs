@@ -16,7 +16,11 @@ pub async fn free_listener() -> (TcpListener, std::net::SocketAddr) {
 pub async fn expect(conn: &mut Conn, want_id: i32) -> Vec<u8> {
     match timeout(Duration::from_secs(5), conn.read_packet()).await {
         Ok(Ok(ReadOutcome::Packet(id, body))) => {
-            assert_eq!(id, want_id, "paquet attendu 0x{:x}, reçu 0x{:x}", want_id, id);
+            assert_eq!(
+                id, want_id,
+                "paquet attendu 0x{:x}, reçu 0x{:x}",
+                want_id, id
+            );
             body
         }
         Ok(Ok(ReadOutcome::Eof)) => panic!("connexion fermée (attendu 0x{:x})", want_id),

@@ -31,24 +31,55 @@ pub fn pattern_for(result_name: &str, planks_id: i32) -> Option<Vec<Option<i32>>
         // 2 planches en colonne verticale (slots 1 et 3 de la grille 2x2)
         vec![vec![m_planks, None], vec![m_planks, None]]
     } else if result_name.ends_with("_pickaxe") {
-        let m = Some(if result_name.starts_with("wooden") { planks_id }
-            else if result_name.starts_with("stone") { item_id("cobblestone") }
-            else if result_name.starts_with("iron") { item_id("iron_ingot") }
-            else if result_name.starts_with("golden") { item_id("gold_ingot") }
-            else if result_name.starts_with("diamond") { item_id("diamond") }
-            else { planks_id });
+        let m = Some(if result_name.starts_with("wooden") {
+            planks_id
+        } else if result_name.starts_with("stone") {
+            item_id("cobblestone")
+        } else if result_name.starts_with("iron") {
+            item_id("iron_ingot")
+        } else if result_name.starts_with("golden") {
+            item_id("gold_ingot")
+        } else if result_name.starts_with("diamond") {
+            item_id("diamond")
+        } else {
+            planks_id
+        });
         vec![vec![m, m, m], vec![None, st, None], vec![None, st, None]]
     } else if result_name.ends_with("_axe") {
-        let m = Some(if result_name.starts_with("wooden") { planks_id } else { item_id("cobblestone") });
+        let m = Some(if result_name.starts_with("wooden") {
+            planks_id
+        } else {
+            item_id("cobblestone")
+        });
         vec![vec![m, m, None], vec![m, st, None], vec![None, st, None]]
     } else if result_name.ends_with("_sword") {
-        let m = Some(if result_name.starts_with("wooden") { planks_id } else { item_id("cobblestone") });
-        vec![vec![m, None, None], vec![m, None, None], vec![None, st, None]]
+        let m = Some(if result_name.starts_with("wooden") {
+            planks_id
+        } else {
+            item_id("cobblestone")
+        });
+        vec![
+            vec![m, None, None],
+            vec![m, None, None],
+            vec![None, st, None],
+        ]
     } else if result_name.ends_with("_shovel") {
-        let m = Some(if result_name.starts_with("wooden") { planks_id } else { item_id("cobblestone") });
-        vec![vec![m, None, None], vec![None, st, None], vec![None, st, None]]
+        let m = Some(if result_name.starts_with("wooden") {
+            planks_id
+        } else {
+            item_id("cobblestone")
+        });
+        vec![
+            vec![m, None, None],
+            vec![None, st, None],
+            vec![None, st, None],
+        ]
     } else if result_name.ends_with("_hoe") {
-        let m = Some(if result_name.starts_with("wooden") { planks_id } else { item_id("cobblestone") });
+        let m = Some(if result_name.starts_with("wooden") {
+            planks_id
+        } else {
+            item_id("cobblestone")
+        });
         vec![vec![m, m, None], vec![None, st, None], vec![None, st, None]]
     } else {
         return None;
@@ -65,7 +96,10 @@ pub fn is_planks_id(id: i32) -> bool {
 pub fn planks_of_log(log_name: &str) -> Option<&'static str> {
     let base = log_name.strip_suffix("_log")?;
     let planks = format!("{}_planks", base);
-    MC_ITEMS.iter().find(|(_, n)| **n == planks).map(|(_, n)| *n)
+    MC_ITEMS
+        .iter()
+        .find(|(_, n)| **n == planks)
+        .map(|(_, n)| *n)
 }
 
 #[derive(Debug, Clone)]
@@ -89,182 +123,227 @@ pub fn recipe_for(result_name: &str) -> Option<Recipe> {
         // --- Bois ---
         "oak_planks" | "spruce_planks" | "birch_planks" | "jungle_planks" | "acacia_planks"
         | "dark_oak_planks" | "mangrove_planks" | "cherry_planks" | "bamboo_planks" => Recipe {
-            result: id, result_count: 4,
+            result: id,
+            result_count: 4,
             ingredients: vec![(log_of_planks(result_name), 1)],
             needs_table: false,
         },
         "crafting_table" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 4)],
             needs_table: false,
         },
         "stick" => Recipe {
-            result: id, result_count: 4,
+            result: id,
+            result_count: 4,
             ingredients: vec![(item_id("oak_planks"), 2)],
             needs_table: false,
         },
         "wooden_pickaxe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "wooden_axe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "wooden_sword" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 2), (item_id("stick"), 1)],
             needs_table: true,
         },
         "wooden_shovel" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 1), (item_id("stick"), 2)],
             needs_table: true,
         },
         // --- Pierre ---
         "stone_pickaxe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("cobblestone"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "stone_axe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("cobblestone"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "stone_sword" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("cobblestone"), 2), (item_id("stick"), 1)],
             needs_table: true,
         },
         "stone_shovel" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("cobblestone"), 1), (item_id("stick"), 2)],
             needs_table: true,
         },
         "furnace" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("cobblestone"), 8)],
             needs_table: true,
         },
         // --- Fer ---
         "iron_pickaxe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "iron_axe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "iron_sword" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 2), (item_id("stick"), 1)],
             needs_table: true,
         },
         "iron_shovel" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 1), (item_id("stick"), 2)],
             needs_table: true,
         },
         "iron_helmet" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 5)],
             needs_table: true,
         },
         "iron_chestplate" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 8)],
             needs_table: true,
         },
         "iron_leggings" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 7)],
             needs_table: true,
         },
         "iron_boots" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 4)],
             needs_table: true,
         },
         "shield" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 1), (item_id("oak_planks"), 6)],
             needs_table: true,
         },
         "bucket" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 3)],
             needs_table: true,
         },
         "flint_and_steel" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("iron_ingot"), 1), (item_id("flint"), 1)],
             needs_table: false,
         },
         // --- Diamant ---
         "diamond_pickaxe" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 3), (item_id("stick"), 2)],
             needs_table: true,
         },
         "diamond_sword" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 2), (item_id("stick"), 1)],
             needs_table: true,
         },
         "diamond_helmet" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 5)],
             needs_table: true,
         },
         "diamond_chestplate" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 8)],
             needs_table: true,
         },
         "diamond_leggings" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 7)],
             needs_table: true,
         },
         "diamond_boots" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("diamond"), 4)],
             needs_table: true,
         },
         // --- Utilitaires ---
         "torch" => Recipe {
-            result: id, result_count: 4,
+            result: id,
+            result_count: 4,
             ingredients: vec![(item_id("coal"), 1), (item_id("stick"), 1)],
             needs_table: false,
         },
         "chest" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("oak_planks"), 8)],
             needs_table: true,
         },
         "bowl" => Recipe {
-            result: id, result_count: 4,
+            result: id,
+            result_count: 4,
             ingredients: vec![(item_id("oak_planks"), 3)],
             needs_table: true,
         },
         "bow" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("stick"), 3), (item_id("string"), 3)],
             needs_table: true,
         },
         "arrow" => Recipe {
-            result: id, result_count: 4,
-            ingredients: vec![(item_id("flint"), 1), (item_id("stick"), 1), (item_id("feather"), 1)],
+            result: id,
+            result_count: 4,
+            ingredients: vec![
+                (item_id("flint"), 1),
+                (item_id("stick"), 1),
+                (item_id("feather"), 1),
+            ],
             needs_table: true,
         },
         // --- Yeux de l'Ender ---
+        "blaze_powder" => Recipe {
+            result: id,
+            result_count: 2,
+            ingredients: vec![(item_id("blaze_rod"), 1)],
+            needs_table: false,
+        },
         "ender_eye" => Recipe {
-            result: id, result_count: 1,
+            result: id,
+            result_count: 1,
             ingredients: vec![(item_id("ender_pearl"), 1), (item_id("blaze_powder"), 1)],
             needs_table: false,
         },
@@ -328,5 +407,22 @@ mod tests {
         assert_eq!(planks_of_log("stone"), None);
         assert!(is_planks_id(item_id("birch_planks")));
         assert!(!is_planks_id(item_id("oak_log")));
+    }
+}
+
+#[cfg(test)]
+mod speedrun_tests {
+    use super::*;
+
+    #[test]
+    fn recettes_yeux_et_poudre() {
+        let powder = recipe_for("blaze_powder").unwrap();
+        assert_eq!(powder.result_count, 2);
+        assert_eq!(powder.ingredients, vec![(item_id("blaze_rod"), 1)]);
+        assert!(!powder.needs_table);
+        let eye = recipe_for("ender_eye").unwrap();
+        assert_eq!(eye.result_count, 1);
+        assert!(eye.ingredients.contains(&(item_id("ender_pearl"), 1)));
+        assert!(eye.ingredients.contains(&(item_id("blaze_powder"), 1)));
     }
 }
